@@ -1,0 +1,3 @@
+# 激励轨迹 - 调用
+
+本目录用于存放激励轨迹**调用**脚本：run_excitation_trajectory_standalone、run_generate_excitation_trajectory、run_TLBO_Excitation_E1、build_excitation_leg_trajectory_with_ramps、write_leg_trajectory_csv_plan_format、plot_end_effector_trajectory、diagnose_regressor_condition、test_cond_fun_from_regressor 等。具体见 **Body_GravityPara_Iden/文件夹梳理说明.md**。当前为逻辑分类，文件仍保留在原位置。
