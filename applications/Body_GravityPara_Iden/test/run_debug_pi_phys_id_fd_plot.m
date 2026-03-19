@@ -41,10 +41,10 @@ run_pi_phys = false;
 % - identify_full_params_for_fd 的参数（你要调的重点在这里）
 %   说明：此优化每次迭代会评估多次 FD（有限差分），所以 MaxFunctionEvaluations 很关键。
 opts_fd = struct();
-opts_fd.w_tau = 1;
-opts_fd.w_qdd = 10;
-opts_fd.w_cad = 10;   % 增强 CAD 先验，避免惯量跑到非 PSD
-opts_fd.w_M   = 0;   % 先关掉 J_M，加速粗跑；需要更稳再改回 10/20
+opts_fd.w_tau = 3;
+opts_fd.w_qdd = 5;
+opts_fd.w_cad = 1;   % 增强 CAD 先验，避免惯量跑到非 PSD
+opts_fd.w_M   = 1;   % 先关掉 J_M，加速粗跑；需要更稳再改回 10/20
 % 约束（先放宽一档，避免 Feasibility 卡死在不可行域）
 opts_fd.m_min_frac = 0.5;
 opts_fd.m_max_frac = 1.5;
@@ -54,11 +54,11 @@ opts_fd.eps_M      = 1e-6;
 opts_fd.algorithm  = 'sqp';
 opts_fd.display    = 'iter';
 % 收敛相关（通常“不完全收敛”就加这两个）
-opts_fd.max_iter   = 60;    % 先粗跑到能动（太大也会很慢）
-opts_fd.MaxFunctionEvaluations = 8000;  % 之前常因评估次数不足提前停；先加大保证能跑到收敛趋势
+opts_fd.max_iter   = 50;    % 先粗跑到能动（太大也会很慢）
+opts_fd.MaxFunctionEvaluations = 3000;  % 之前常因评估次数不足提前停；先加大保证能跑到收敛趋势
 % 抽样点：影响速度/稳定性（点越多越稳但越慢）
-opts_fd.n_qdd = 8;    % 初始阶段强烈建议 <= 8
-opts_fd.n_reg = 4;    % 初始阶段强烈建议 <= 4（且 w_M=0 时可随意）
+opts_fd.n_qdd = 20;    % 初始阶段强烈建议 <= 8
+opts_fd.n_reg = 8;    % 初始阶段强烈建议 <= 4（且 w_M=0 时可随意）
 % 约束诊断：打印“最严重违规来自哪类约束/哪个 link”
 opts_fd.debug_constraints = true;
 opts_fd.debug_constraints_every = 50;

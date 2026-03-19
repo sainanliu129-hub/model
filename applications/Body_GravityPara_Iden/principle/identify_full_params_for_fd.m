@@ -5,9 +5,10 @@ function [pi_fd, info] = identify_full_params_for_fd(q_bar, qd_bar, qdd_bar, tau
 %   qdd_FD(π) = M(q,π)^{-1}(τ - h(q,qd,π))
 %
 % 优化目标（加权和）：
-%   J = w_tau*J_tau + w_qdd*J_qdd + w_cad*J_cad + w_M*J_M
+%   J = w_tau*J_tau + w_qdd*J_qdd + w_traj*J_traj + w_cad*J_cad + w_M*J_M
 %   J_tau  = sum_k ||Y*π - τ_k||^2
 %   J_qdd  = sum_k ||qdd_FD(q_k,qd_k,τ_k,π) - qdd_k_ref||^2
+%   J_traj = 短窗积分轨迹误差（q/qd）
 %   J_cad  = (π-π_cad)'*W*(π-π_cad)，W 按参数类型加权
 %   J_reg  = sum_s max(0, eps_M - min(eig(M(q_s,π))))^2
 %
@@ -21,7 +22,9 @@ function [pi_fd, info] = identify_full_params_for_fd(q_bar, qd_bar, qdd_bar, tau
 %   opts     - 可选：
 %     .pi0           - 60×1 初值（缺省用 pi_cad）
 %     .fix_offdiag   - true（默认）固定交叉惯量=CAD
-%     .w_tau, .w_qdd, .w_cad, .w_M   - 权重（仿真建议 1,10,1,10；实机 1,1~3,5,10）
+%     .w_tau, .w_qdd, .w_traj, .w_cad, .w_M - 权重
+%     .traj_Ns, .traj_H, .traj_dt, .alpha_q, .alpha_qd - J_traj 相关参数
+%     .idx_traj      - J_traj 起点下标（缺省均匀抽样 traj_Ns 个）
 %     .w_m, .w_h, .w_Idiag, .w_Ioff  - J_cad 内权（默认 10,30,10,100）
 %     .m_min_frac, .m_max_frac       - 0.7, 1.3
 %     .delta_c                       - CoM 约束 0.02 (m)
@@ -55,8 +58,14 @@ opts = set_default(opts, 'pi0', []);
 opts = set_default(opts, 'fix_offdiag', true);
 opts = set_default(opts, 'w_tau', 1);
 opts = set_default(opts, 'w_qdd', 10);
+opts = set_default(opts, 'w_traj', 0);
 opts = set_default(opts, 'w_cad', 1);
 opts = set_default(opts, 'w_M', 10);
+opts = set_default(opts, 'traj_Ns', 4);
+opts = set_default(opts, 'traj_H', 20);
+opts = set_default(opts, 'traj_dt', 0.002);
+opts = set_default(opts, 'alpha_q', 1.0);
+opts = set_default(opts, 'alpha_qd', 0.3);
 opts = set_default(opts, 'w_m', 10);
 opts = set_default(opts, 'w_h', 30);
 opts = set_default(opts, 'w_Idiag', 10);
@@ -93,6 +102,19 @@ if ~isfield(opts, 'idx_reg') || isempty(opts.idx_reg)
     idx_reg = round(linspace(1, M, n_reg))';
 else
     idx_reg = opts.idx_reg(:);
+end
+
+% J_traj 的起点抽样：保证每个起点都能向前走 H 步
+traj_H = max(0, round(opts.traj_H));
+max_start = M - traj_H;
+if traj_H <= 0 || max_start < 1
+    idx_traj = zeros(0, 1);
+elseif ~isfield(opts, 'idx_traj') || isempty(opts.idx_traj)
+    Ns_eff = max(1, round(opts.traj_Ns));
+    idx_traj = round(linspace(1, max_start, Ns_eff)).';
+else
+    idx_traj = opts.idx_traj(:);
+    idx_traj = idx_traj(idx_traj >= 1 & idx_traj <= max_start);
 end
 
 % 预计算 Y_stack：(M*n)×60，tau_vec：(M*n)×1
@@ -183,6 +205,36 @@ end
 info.rmse_qdd = sqrt(mean(qdd_err(:).^2));
 info.maxerr_qdd = max(abs(qdd_err(:)));
 
+% 轨迹短窗误差诊断（与 J_traj 一致）
+traj_q_err2_sum = 0;
+traj_qd_err2_sum = 0;
+traj_cnt = 0;
+for ii = 1:numel(idx_traj)
+    s = idx_traj(ii);
+    q_sim = q_bar(s, :);
+    qd_sim = qd_bar(s, :);
+    for h = 1:traj_H
+        k_tau = s + h - 1;
+        k_ref = s + h;
+        qdd_sim = forward_dynamics_full(q_sim, qd_sim, tau_bar(k_tau,:), pi_fd, limb, para_order, opts_fd_call);
+        qd_sim = qd_sim + opts.traj_dt * qdd_sim(:).';
+        q_sim  = q_sim  + opts.traj_dt * qd_sim;
+
+        dq = q_sim - q_bar(k_ref, :);
+        dqd = qd_sim - qd_bar(k_ref, :);
+        traj_q_err2_sum = traj_q_err2_sum + sum(dq.^2);
+        traj_qd_err2_sum = traj_qd_err2_sum + sum(dqd.^2);
+        traj_cnt = traj_cnt + n;
+    end
+end
+if traj_cnt > 0
+    info.rmse_traj_q = sqrt(traj_q_err2_sum / traj_cnt);
+    info.rmse_traj_qd = sqrt(traj_qd_err2_sum / traj_cnt);
+else
+    info.rmse_traj_q = 0;
+    info.rmse_traj_qd = 0;
+end
+
 info.per_link = struct([]);
 for i = 1:n_links
     idx = (i-1)*10 + (1:10);
@@ -245,6 +297,36 @@ end
             J_qdd = J_qdd + e_qdd.' * e_qdd;
         end
 
+        % J_traj：短窗积分轨迹误差
+        J_q = 0;
+        J_qd = 0;
+        for it = 1:numel(idx_traj)
+            s = idx_traj(it);
+            q_sim = q_bar(s, :);
+            qd_sim = qd_bar(s, :);
+            for h = 1:traj_H
+                k_tau = s + h - 1;
+                k_ref = s + h;
+                qdd_sim = forward_dynamics_full(q_sim, qd_sim, tau_bar(k_tau,:), pi, limb, para_order, opts_fd_call);
+                qd_sim = qd_sim + opts.traj_dt * qdd_sim(:).';
+                q_sim  = q_sim  + opts.traj_dt * qd_sim;
+
+                dq = q_sim - q_bar(k_ref, :);
+                dqd = qd_sim - qd_bar(k_ref, :);
+                J_q = J_q + sum(dq.^2);
+                J_qd = J_qd + sum(dqd.^2);
+            end
+        end
+        if ~isempty(idx_traj) && traj_H > 0
+            norm_traj = numel(idx_traj) * traj_H * n;
+            J_q = J_q / norm_traj;
+            J_qd = J_qd / norm_traj;
+        else
+            J_q = 0;
+            J_qd = 0;
+        end
+        J_traj = opts.alpha_q * J_q + opts.alpha_qd * J_qd;
+
         % J_cad 加权 (π-π_cad)'*W*(π-π_cad)
         d = pi - pi_cad;
         J_cad = 0;
@@ -266,7 +348,7 @@ end
             end
         end
 
-        f = opts.w_tau*J_tau + opts.w_qdd*J_qdd + opts.w_cad*J_cad + opts.w_M*J_M;
+        f = opts.w_tau*J_tau + opts.w_qdd*J_qdd + opts.w_traj*J_traj + opts.w_cad*J_cad + opts.w_M*J_M;
     end
 
 % ----- 非线性约束（每 link：CoM、I 正定+三角） -----

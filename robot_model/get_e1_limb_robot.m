@@ -31,6 +31,23 @@ default_urdf_dir = fullfile(repo_root, 'noetix_description', 'urdf');
 urdf_path = fullfile(default_urdf_dir, urdf_name);
 
 if ~exist(urdf_path, 'file')
+    % 兜底：有些工程把 URDF 放在 repo_root/urdf/ 下，或运行目录不在仓库根导致默认路径失效
+    alt1 = fullfile(repo_root, 'urdf', urdf_name);
+    if exist(alt1, 'file')
+        urdf_path = alt1;
+    else
+        % 再兜底：使用 utility_function/get_e1_urdf_path 的搜索顺序（若在路径中）
+        if exist('get_e1_urdf_path', 'file')
+            try
+                urdf_path = get_e1_urdf_path(fullfile(repo_root, 'noetix_description', 'urdf', urdf_name));
+            catch
+                % ignore, fallthrough to error
+            end
+        end
+    end
+end
+
+if ~exist(urdf_path, 'file')
     error('找不到 URDF: %s', urdf_path);
 end
 % 缓存键含文件修改时间，URDF 保存后会自动重新加载，避免质量/惯性与文件不一致
