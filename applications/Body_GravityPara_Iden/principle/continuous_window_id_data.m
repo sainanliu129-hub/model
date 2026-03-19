@@ -2,7 +2,7 @@ function avg_data = continuous_window_id_data(t, q, qd, tau, opts, qdd_given)
 % continuous_window_id_data  取激励段 → 可选 qd 低通 → qdd 由 qd 差分或直接采用给定 qdd
 %
 % 推荐：只取中间激励段（如 t∈[3,5]s）。若已用 preprocess_id_data 得到同源 q/qd/qdd，可传入 qdd_given 跳过内部差分。
-% 流程：时间窗 → 可选 qd 二阶低通 → qdd = 给定或由 qd 中心差分 → 可选 SG 平滑 qdd → 可选高|qdd|降权。
+% 流程：时间窗 → 可选 qd 二阶低通 → qdd = 给定或由 qd 中心差分 → 可选高|qdd|降权。
 %
 % 用法：
 %   avg_data = continuous_window_id_data(t, q, qd, tau);
@@ -13,7 +13,6 @@ function avg_data = continuous_window_id_data(t, q, qd, tau, opts, qdd_given)
 %   t_start_s, t_end_s - 激励段绝对时间 (s)
 %   trim_start_s, trim_end_s, trim_ratio - 或按首尾裁
 %   qd_lowpass_fc_Hz - qd 二阶低通截止 (Hz)，0=不滤波
-%   qdd_smooth_half - 对 qdd 做 SG 平滑的半窗长，0=不平滑（若已用预处理 qdd 建议 0）
 %   downweight_qdd_top_ratio - 对 |qdd| 最大的一小部分降权，默认 0.02
 % 可选第六参 qdd_given - M×n，若提供则不再由 qd 差分，直接使用（与 q 同长度）
 
@@ -29,7 +28,6 @@ if ~isfield(opts, 'trim_start_s'),   opts.trim_start_s   = 0; end
 if ~isfield(opts, 'trim_end_s'),     opts.trim_end_s     = 0; end
 if ~isfield(opts, 'trim_ratio'),     opts.trim_ratio     = 0; end
 if ~isfield(opts, 'qd_lowpass_fc_Hz'), opts.qd_lowpass_fc_Hz = 0; end
-if ~isfield(opts, 'qdd_smooth_half'), opts.qdd_smooth_half = 0; end
 if ~isfield(opts, 'downweight_qdd_top_ratio'), opts.downweight_qdd_top_ratio = 0.02; end
 
 t   = t(:);
@@ -101,16 +99,7 @@ else
     end
 end
 
-% 4) SG 平滑 qdd（建议，去尖峰）
-if opts.qdd_smooth_half > 0
-    half = min(opts.qdd_smooth_half, floor((M-1)/2));
-    ord = min(3, 2*half);
-    for j = 1:n
-        qdd_win(:, j) = sgolayfilt(qdd_win(:, j), ord, 2*half+1);
-    end
-end
-
-% 5) 降权：对 |qdd| 最大的 top 比例样本放大 tau_std（WLS 时权小）
+% 4) 降权：对 |qdd| 最大的 top 比例样本放大 tau_std（WLS 时权小）
 tau_std_win = ones(M, n);
 if opts.downweight_qdd_top_ratio > 0
     % 每行取 max over joints 或 2-norm 作为“该点加速度大小”
@@ -124,7 +113,7 @@ if opts.downweight_qdd_top_ratio > 0
     end
 end
 
-% 6) 输出结构（与 cycle_average 兼容）
+% 5) 输出结构
 avg_data = struct();
 avg_data.phi      = (0:(M-1))' / M;
 avg_data.q_bar   = q_win;

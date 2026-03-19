@@ -1,213 +1,131 @@
 function R = run_plot_id_fd_only(cfg)
-% run_plot_id_fd_only 统一“正逆动力学验证/画图”入口（函数）
-%
-% 目标：不跑任何辨识/优化，只读 build/id_param_sets.mat（或 min_param_id_result.mat）
-%      按 cfg.models 选择要对比的模型，并绘图/输出误差统计。
-%
-% 用法（默认）：
-%   run_plot_id_fd_only();
-%
-% 用法（自定义）：
-%   cfg = struct(); cfg.models = {'pi_fd','beta','cad'}; cfg.N_fd=300; cfg.do_plot=false;
-%   R = run_plot_id_fd_only(cfg);
+% run_plot_id_fd_only  统一 ID/FD 对比与统计（薄封装）
 
-    if nargin < 1, cfg = struct(); end
+if nargin < 1, cfg = struct(); end
 
-    clc;
-    app_root = fullfile(fileparts(mfilename('fullpath')), '..');
-    addpath(fullfile(app_root, 'principle'));
-    addpath(app_root);
+app_root = fullfile(fileparts(mfilename('fullpath')), '..');
+addpath(fullfile(app_root, 'principle'));
+addpath(app_root);
+if exist('ensure_body_gravity_para_iden_path', 'file')
     ensure_body_gravity_para_iden_path();
+end
 
-    cfg = set_default(cfg, 'models', {'pi_fd','cad','beta'});
-    cfg = set_default(cfg, 'limb', 'left_leg');
-    cfg = set_default(cfg, 'para_order', 1);
-    cfg = set_default(cfg, 'N_plot', inf);
-    cfg = set_default(cfg, 'N_fd', 500);
-    cfg = set_default(cfg, 'do_plot', true);
+cfg = set_default(cfg, 'models', {'pi_fd','cad','beta'});
+cfg = set_default(cfg, 'limb', 'left_leg');
+cfg = set_default(cfg, 'para_order', 1);
+cfg = set_default(cfg, 'N_plot', inf);
+cfg = set_default(cfg, 'N_fd', 500);
+cfg = set_default(cfg, 'do_plot', true);
+cfg = set_default(cfg, 'save_excel', false);
+cfg = set_default(cfg, 'input_mat', fullfile(app_root, 'build', 'id_param_sets.mat'));
 
-    models = string(cfg.models);
-    limb = cfg.limb;
-    para_order = cfg.para_order;
+S = load(cfg.input_mat);
+avg_data = S.avg_data;
+X_hat = S.X_hat(:);
+index_base = S.index_base(:);
 
-    % 输入文件（允许外部指定，方便“辨识轨迹A + 对比轨迹B”）
-    build_dir = fullfile(app_root, 'build');
-    cfg = set_default(cfg, 'input_mat', fullfile(build_dir, 'id_param_sets.mat'));
-    set_mat = cfg.input_mat;
-    min_mat = fullfile(app_root, 'min_param_id_result.mat');
-    fd_mat  = fullfile(build_dir, 'pi_fd_result.mat');
+[robot_limb, n] = get_e1_limb_robot(cfg.limb);
+pi_cad = get_limb_theta_from_URDF(robot_limb, cfg.para_order);
+pi_fd = pick_field(S, 'pi_fd', []);
+pi_rec = pick_field(S, 'pi_rec', []);
+pi_phys = pick_field(S, 'pi_phys', []);
 
-    Sset = struct();
-    if isfile(set_mat)
-        Sset = load(set_mat);
-    elseif isfile(min_mat)
-        Sset = load(min_mat);
-    else
-        error('未找到 %s 或 %s。请先跑 run_min_param_id_from_csv 或 run_identify_pi_fd_only。', set_mat, min_mat);
-    end
+M = size(avg_data.q_bar,1);
+N_plot = min(M, cfg.N_plot);
+N_fd = min(M, cfg.N_fd);
+t = avg_data.t_equiv(:);
+q = avg_data.q_bar; qd = avg_data.qd_bar; qdd = avg_data.qdd_bar; tau = avg_data.tau_bar;
 
-    if isfield(Sset, 'avg_data')
-        avg_data = Sset.avg_data;
-        X_hat = Sset.X_hat(:);
-        index_base = Sset.index_base(:);
-    else
-        error('输入 mat 缺少 avg_data/X_hat/index_base。请确认来源文件。');
-    end
+% ID
+id_models = {};
+id_preds = [];
+if any(strcmp(cfg.models,'cad')), id_models{end+1} = struct('name','Y\pi_{cad}','m',struct('type','full','limb',cfg.limb,'para_order',cfg.para_order,'pi_vec',pi_cad)); end
+if any(strcmp(cfg.models,'beta')), id_models{end+1} = struct('name','Y_{min}X_{hat}','m',struct('type','min','limb',cfg.limb,'para_order',cfg.para_order,'X_hat',X_hat,'index_base',index_base)); end
+if any(strcmp(cfg.models,'pi_fd')) && ~isempty(pi_fd), id_models{end+1} = struct('name','Y\pi_{fd}','m',struct('type','full','limb',cfg.limb,'para_order',cfg.para_order,'pi_vec',pi_fd)); end
+if any(strcmp(cfg.models,'pi_rec')) && ~isempty(pi_rec), id_models{end+1} = struct('name','Y\pi_{rec}','m',struct('type','full','limb',cfg.limb,'para_order',cfg.para_order,'pi_vec',pi_rec)); end
+if any(strcmp(cfg.models,'pi_phys')) && ~isempty(pi_phys), id_models{end+1} = struct('name','Y\pi_{phys}','m',struct('type','full','limb',cfg.limb,'para_order',cfg.para_order,'pi_vec',pi_phys)); end
 
-    t_all   = avg_data.t_equiv(:);
-    q_all   = avg_data.q_bar;
-    qd_all  = avg_data.qd_bar;
-    qdd_all = avg_data.qdd_bar;
-    tau_all = avg_data.tau_bar;
-
-    M = size(q_all, 1);
-    N_plot = min(M, cfg.N_plot);
-    N_fd   = min(M, cfg.N_fd);
-
-    % 参数集合（CAD/β 必有；π_fd/π_rec/π_phys 可能没有）
-    [robot_limb, n] = get_e1_limb_robot(limb);
-    pi_cad = get_limb_theta_from_URDF(robot_limb, para_order);
-    pi_cad = pi_cad(:);
-
-    pi_fd = [];
-    pi_rec = [];
-    pi_phys = [];
-    if isfield(Sset, 'pi_fd') && ~isempty(Sset.pi_fd), pi_fd = Sset.pi_fd(:); end
-    if isempty(pi_fd) && isfile(fd_mat)
-        Sd = load(fd_mat);
-        if isfield(Sd, 'pi_fd') && ~isempty(Sd.pi_fd), pi_fd = Sd.pi_fd(:); end
-    end
-    if isfield(Sset, 'pi_rec') && ~isempty(Sset.pi_rec), pi_rec = Sset.pi_rec(:); end
-    if isfield(Sset, 'pi_phys') && ~isempty(Sset.pi_phys), pi_phys = Sset.pi_phys(:); end
-
-    % --------------------
-    % ID: tau
-    % --------------------
-    tau_id = tau_all(1:N_plot, :);
-    preds_tau = struct();
-    names_tau = {};
-    mats_tau = {};
-
-    if any(models == "cad")
-        preds_tau.cad = zeros(N_plot, n);
-        names_tau{end+1} = 'Y\pi_{cad}'; %#ok<AGROW>
-    end
-    if any(models == "beta")
-        preds_tau.beta = zeros(N_plot, n);
-        names_tau{end+1} = 'Y_{min}X_{hat}'; %#ok<AGROW>
-    end
-    if any(models == "pi_fd") && ~isempty(pi_fd)
-        preds_tau.pi_fd = zeros(N_plot, n);
-        names_tau{end+1} = 'Y\pi_{fd}'; %#ok<AGROW>
-    end
-    if any(models == "pi_rec") && ~isempty(pi_rec)
-        preds_tau.pi_rec = zeros(N_plot, n);
-        names_tau{end+1} = 'Y\pi_{rec}'; %#ok<AGROW>
-    end
-    if any(models == "pi_phys") && ~isempty(pi_phys)
-        preds_tau.pi_phys = zeros(N_plot, n);
-        names_tau{end+1} = 'Y\pi_{phys}'; %#ok<AGROW>
-    end
-
+R = struct(); R.id = struct('rmse', struct()); R.fd = struct('rmse', struct(), 'rmse_qd', struct());
+for i = 1:numel(id_models)
+    pred = zeros(N_plot, n);
     for k = 1:N_plot
-        qk   = q_all(k, :);
-        qdk  = qd_all(k, :);
-        qddk = qdd_all(k, :);
-        Y_one = ReMatrix_E1_limb_URDF(limb, qk, qdk, qddk, 1, para_order);
-        if isfield(preds_tau, 'cad'),  preds_tau.cad(k,:)  = (Y_one * pi_cad).'; end
-        if isfield(preds_tau, 'beta'), preds_tau.beta(k,:) = (Y_one(:, index_base) * X_hat).'; end
-        if isfield(preds_tau, 'pi_fd'),   preds_tau.pi_fd(k,:)   = (Y_one * pi_fd).'; end
-        if isfield(preds_tau, 'pi_rec'),  preds_tau.pi_rec(k,:)  = (Y_one * pi_rec).'; end
-        if isfield(preds_tau, 'pi_phys'), preds_tau.pi_phys(k,:) = (Y_one * pi_phys).'; end
+        pred(k,:) = inverse_dynamics_dispatch(q(k,:), qd(k,:), qdd(k,:), id_models{i}.m).';
     end
+    id_preds = [id_preds, pred]; %#ok<AGROW>
+    key = matlab.lang.makeValidName(id_models{i}.name);
+    R.id.rmse.(key) = sqrt(mean((pred - tau(1:N_plot,:)).^2, 1));
+end
+if cfg.do_plot && ~isempty(id_models)
+    id_names = cell(1, numel(id_models));
+    for i = 1:numel(id_models), id_names{i} = id_models{i}.name; end
+    plot_compare_with_error_6dof(t(1:N_plot), tau(1:N_plot,:), '\tau_{meas/id}', id_preds, ...
+        id_names, 'torque', 'ID对比');
+end
 
-    % 组装绘图矩阵（tau_id 在第 1 组）
-    mats_tau{1} = tau_id; %#ok<AGROW>
-    leg_tau = {'\tau_{meas/id}'};
-    fields_order = {'pi_fd','cad','beta','pi_rec','pi_phys'};
-    for i = 1:numel(fields_order)
-        f = fields_order{i};
-        if isfield(preds_tau, f)
-            mats_tau{end+1} = preds_tau.(f); %#ok<AGROW>
-            leg_tau{end+1} = map_name(f); %#ok<AGROW>
-        end
-    end
+% FD
+fd_models = {};
+if any(strcmp(cfg.models,'cad')), fd_models{end+1} = struct('name','FD(CAD)','m',struct('type','urdf','limb',cfg.limb,'para_order',cfg.para_order)); end
+if any(strcmp(cfg.models,'beta')), fd_models{end+1} = struct('name','FD(\beta)','m',struct('type','min','limb',cfg.limb,'para_order',cfg.para_order,'X_hat',X_hat,'index_base',index_base)); end
+if any(strcmp(cfg.models,'pi_fd')) && ~isempty(pi_fd), fd_models{end+1} = struct('name','FD(\pi_{fd})','m',struct('type','full','limb',cfg.limb,'para_order',cfg.para_order,'pi_vec',pi_fd)); end
+if any(strcmp(cfg.models,'pi_rec')) && ~isempty(pi_rec), fd_models{end+1} = struct('name','FD(\pi_{rec})','m',struct('type','full','limb',cfg.limb,'para_order',cfg.para_order,'pi_vec',pi_rec)); end
+if any(strcmp(cfg.models,'pi_phys')) && ~isempty(pi_phys), fd_models{end+1} = struct('name','FD(\pi_{phys})','m',struct('type','full','limb',cfg.limb,'para_order',cfg.para_order,'pi_vec',pi_phys)); end
 
-    % 误差统计
-    R = struct();
-    R.id = struct();
-    R.id.rmse = struct();
-    if isfield(preds_tau, 'cad'),  R.id.rmse.cad  = sqrt(mean((preds_tau.cad  - tau_id).^2, 1)); end
-    if isfield(preds_tau, 'beta'), R.id.rmse.beta = sqrt(mean((preds_tau.beta - tau_id).^2, 1)); end
-    if isfield(preds_tau, 'pi_fd'),   R.id.rmse.pi_fd   = sqrt(mean((preds_tau.pi_fd - tau_id).^2, 1)); end
-    if isfield(preds_tau, 'pi_rec'),  R.id.rmse.pi_rec  = sqrt(mean((preds_tau.pi_rec - tau_id).^2, 1)); end
-    if isfield(preds_tau, 'pi_phys'), R.id.rmse.pi_phys = sqrt(mean((preds_tau.pi_phys - tau_id).^2, 1)); end
-
-    if cfg.do_plot
-        figure('Name', 'ID_tau_compare');
-        plot_compare_6dof(t_all(1:N_plot), horzcat(mats_tau{:}), 'torque', leg_tau);
-        sgtitle('逆动力学：实测 vs 多模型对比');
-    end
-
-    % --------------------
-    % FD: qdd
-    % --------------------
-    qdd_id = qdd_all(1:N_fd, :);
-    preds_qdd = struct();
-    R.fd = struct();
-    R.fd.rmse = struct();
-
-    if any(models == "cad"), preds_qdd.cad = zeros(N_fd, n); end
-    if any(models == "beta"), preds_qdd.beta = zeros(N_fd, n); end
-    if any(models == "pi_fd") && ~isempty(pi_fd), preds_qdd.pi_fd = zeros(N_fd, n); end
-    if any(models == "pi_rec") && ~isempty(pi_rec), preds_qdd.pi_rec = zeros(N_fd, n); end
-    if any(models == "pi_phys") && ~isempty(pi_phys), preds_qdd.pi_phys = zeros(N_fd, n); end
-
+fd_preds = [];
+for i = 1:numel(fd_models)
+    pred = zeros(N_fd, n);
     for k = 1:N_fd
-        qk = q_all(k, :);
-        qdk = qd_all(k, :);
-        tauk = tau_all(k, :);
-        if isfield(preds_qdd, 'cad'),  preds_qdd.cad(k,:)  = forwardDynamics(robot_limb, qk, qdk, tauk).'; end
-        if isfield(preds_qdd, 'beta'), preds_qdd.beta(k,:) = forward_dynamics_min(qk.', qdk.', tauk(:), X_hat, index_base, limb, para_order).'; end
-        if isfield(preds_qdd, 'pi_fd'),   preds_qdd.pi_fd(k,:)   = forward_dynamics_full(qk, qdk, tauk, pi_fd, limb, para_order).'; end
-        if isfield(preds_qdd, 'pi_rec'),  preds_qdd.pi_rec(k,:)  = forward_dynamics_full(qk, qdk, tauk, pi_rec, limb, para_order).'; end
-        if isfield(preds_qdd, 'pi_phys'), preds_qdd.pi_phys(k,:) = forward_dynamics_full(qk, qdk, tauk, pi_phys, limb, para_order).'; end
+        pred(k,:) = forward_dynamics_dispatch(q(k,:), qd(k,:), tau(k,:), fd_models{i}.m, struct()).';
     end
+    fd_preds = [fd_preds, pred]; %#ok<AGROW>
+    key = matlab.lang.makeValidName(fd_models{i}.name);
+    R.fd.rmse.(key) = sqrt(mean((pred - qdd(1:N_fd,:)).^2, 1));
+end
 
-    if isfield(preds_qdd, 'cad'),  R.fd.rmse.cad  = sqrt(mean((preds_qdd.cad  - qdd_id).^2, 1)); end
-    if isfield(preds_qdd, 'beta'), R.fd.rmse.beta = sqrt(mean((preds_qdd.beta - qdd_id).^2, 1)); end
-    if isfield(preds_qdd, 'pi_fd'),   R.fd.rmse.pi_fd   = sqrt(mean((preds_qdd.pi_fd - qdd_id).^2, 1)); end
-    if isfield(preds_qdd, 'pi_rec'),  R.fd.rmse.pi_rec  = sqrt(mean((preds_qdd.pi_rec - qdd_id).^2, 1)); end
-    if isfield(preds_qdd, 'pi_phys'), R.fd.rmse.pi_phys = sqrt(mean((preds_qdd.pi_phys - qdd_id).^2, 1)); end
+% qdd 积分得到 qd，用于正动力学速度误差分析
+fd_preds_qd = [];
+qd_ref_fd = qd(1:N_fd, :);
+for i = 1:numel(fd_models)
+    qdd_pred_i = fd_preds(:, (i-1)*n+1:i*n);
+    qd_pred_i = integrate_qdd_to_qd(t(1:N_fd), qd_ref_fd(1,:), qdd_pred_i);
+    fd_preds_qd = [fd_preds_qd, qd_pred_i]; %#ok<AGROW>
+    key = matlab.lang.makeValidName(fd_models{i}.name);
+    R.fd.rmse_qd.(key) = sqrt(mean((qd_pred_i - qd_ref_fd).^2, 1));
+end
+if cfg.do_plot && ~isempty(fd_models)
+    fd_names = cell(1, numel(fd_models));
+    for i = 1:numel(fd_models), fd_names{i} = fd_models{i}.name; end
+    plot_compare_with_error_6dof(t(1:N_fd), qd_ref_fd, 'qd_{id轨迹}', fd_preds_qd, ...
+        fd_names, 'qdd', 'FD速度对比');
+    plot_compare_with_error_6dof(t(1:N_fd), qdd(1:N_fd,:), 'qdd_{id轨迹}', fd_preds, ...
+        fd_names, 'qdd', 'FD对比');
+end
 
-    if cfg.do_plot
-        mats_qdd = {qdd_id};
-        leg_qdd = {'qdd_{id轨迹}'};
-        if isfield(preds_qdd, 'pi_fd'), mats_qdd{end+1} = preds_qdd.pi_fd; leg_qdd{end+1} = 'FD(\pi_{fd})'; end
-        if isfield(preds_qdd, 'cad'),  mats_qdd{end+1} = preds_qdd.cad;  leg_qdd{end+1} = 'FD(CAD)'; end
-        if isfield(preds_qdd, 'beta'), mats_qdd{end+1} = preds_qdd.beta; leg_qdd{end+1} = 'FD(\beta)'; end
-        if isfield(preds_qdd, 'pi_rec'),  mats_qdd{end+1} = preds_qdd.pi_rec;  leg_qdd{end+1} = 'FD(\pi_{rec})'; end
-        if isfield(preds_qdd, 'pi_phys'), mats_qdd{end+1} = preds_qdd.pi_phys; leg_qdd{end+1} = 'FD(\pi_{phys})'; end
-
-        figure('Name', 'FD_qdd_compare');
-        plot_compare_6dof(t_all(1:N_fd), horzcat(mats_qdd{:}), 'qdd', leg_qdd);
-        sgtitle('正动力学：qdd_{id} vs 多模型对比');
-    end
+if cfg.save_excel
+    out_xlsx = fullfile(app_root, 'build', 'plot_id_fd_only_summary.xlsx');
+    meta_tbl = table(string(cfg.input_mat), N_plot, N_fd, 'VariableNames', {'input_mat','N_plot','N_fd'});
+    export_validation_summary_excel(out_xlsx, R.id.rmse, R.fd.rmse, meta_tbl);
+end
 end
 
 function s = set_default(s, name, val)
-    if ~isfield(s, name) || isempty(s.(name))
-        s.(name) = val;
-    end
+if ~isfield(s, name) || isempty(s.(name)), s.(name) = val; end
 end
 
-function nm = map_name(field)
-    switch field
-        case 'pi_fd', nm = 'Y\pi_{fd}';
-        case 'cad', nm = 'Y\pi_{cad}';
-        case 'beta', nm = 'Y_{min}X_{hat}';
-        case 'pi_rec', nm = 'Y\pi_{rec}';
-        case 'pi_phys', nm = 'Y\pi_{phys}';
-        otherwise, nm = field;
-    end
+function v = pick_field(s, name, default_v)
+if isfield(s, name) && ~isempty(s.(name)), v = s.(name); else, v = default_v; end
 end
+
+function qd_pred = integrate_qdd_to_qd(t, qd0, qdd_pred)
+N = size(qdd_pred, 1);
+n = size(qdd_pred, 2);
+qd_pred = zeros(N, n);
+qd_pred(1, :) = qd0;
+if N <= 1, return; end
+dt_med = median(diff(t));
+for k = 2:N
+    dt = t(k) - t(k-1);
+    if dt <= 0 || isnan(dt), dt = dt_med; end
+    qd_pred(k, :) = qd_pred(k-1, :) + dt * qdd_pred(k-1, :);
+end
+end
+

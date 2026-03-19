@@ -121,15 +121,9 @@ end
 
 if save_excel
     out_xlsx = fullfile(build_dir, 'light_validation_summary.xlsx');
-
-    % ID RMSE 表
-    T_id = rmse_struct_to_table(R.id.rmse, 'id_rmse');
-    % FD RMSE 表
-    T_fd = rmse_struct_to_table(R.fd.rmse, 'fd_rmse');
-
-    writetable(T_id, out_xlsx, 'Sheet', 'ID_RMSE');
-    writetable(T_fd, out_xlsx, 'Sheet', 'FD_RMSE');
-    fprintf('已导出 Excel: %s\n', out_xlsx);
+    meta_tbl = table(string(input_mat_for_plot), ...
+        'VariableNames', {'input_mat_for_plot'});
+    export_validation_summary_excel(out_xlsx, R.id.rmse, R.fd.rmse, meta_tbl);
 end
 
 %% local functions（脚本尾部）
@@ -139,30 +133,5 @@ function s = set_default(s, name, val)
     end
 end
 
-function T = rmse_struct_to_table(Srmse, tag_col)
-    if nargin < 2, tag_col = 'type'; end
-    if isempty(Srmse) || ~isstruct(Srmse)
-        T = table();
-        return;
-    end
-    fn = fieldnames(Srmse);
-    nrow = numel(fn);
-    T = table('Size', [nrow, 9], ...
-        'VariableTypes', {'string','double','double','double','double','double','double','double','double'}, ...
-        'VariableNames', {tag_col,'j1','j2','j3','j4','j5','j6','mean','max'});
-    for i = 1:nrow
-        k = fn{i};
-        v = Srmse.(k);
-        v = v(:).';
-        if numel(v) < 6
-            v = [v, nan(1, 6-numel(v))];
-        else
-            v = v(1:6);
-        end
-        T.(tag_col)(i) = string(k);
-        T{i, 2:7} = num2cell(v);
-        T.mean(i) = mean(v, 'omitnan');
-        T.max(i)  = max(v);
-    end
-end
+% rmse_struct_to_table 已迁移到 principle/rmse_struct_to_table.m
 

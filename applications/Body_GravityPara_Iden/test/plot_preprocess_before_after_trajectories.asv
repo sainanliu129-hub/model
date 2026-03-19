@@ -43,9 +43,13 @@ prep_opts = struct();
 prep_opts.t_start_s = 2.1;
 prep_opts.t_end_s   = 4.1;
 
-% 轨迹导数估计方式（当前统一为 lowpass_diff）
-prep_opts.derivative_method = 'lowpass_diff';  % 仅对 q 做零相位低通，再中心差分得到 qd/qdd
-prep_opts.q_lowpass_fc_Hz = 25;      % q 低通截止频率(Hz)：越低滤波越强；越高保留动态越多（qdd 也更“抖”）
+% SG 求导参数
+prep_opts.sg_order = 4;   % SG 多项式阶次：高一些更能保留局部曲率/细节，但更敏感噪声；常用 2~4
+prep_opts.sg_frame = 12;  % SG 窗长(奇数)：越大越平滑、qdd 越“钝”；越小越灵敏但噪声更大（500Hz 常用 11~31）
+% 轨迹导数估计方式：'sg' 或 'lowpass_diff'
+% - 'lowpass_diff': 仅对 q 做零相位低通，再中心差分得到 qd/qdd
+prep_opts.derivative_method = 'lowpass_diff';  % 'sg' 适合平滑导数；'lowpass_diff' 更直观可控（先低通再差分）
+prep_opts.q_lowpass_fc_Hz = 20;      % q 低通截止频率(Hz)：越低滤波越强；越高保留动态越多（qdd 也更“抖”）
 prep_opts.q_lowpass_order = 2;       % q 低通阶数：越高滚降越陡、可能更易振铃；建议先用 2，再试 3
 
 % tau 低通参数（零相位）
@@ -53,7 +57,7 @@ prep_opts.tau_lowpass_fc_Hz = 25; % tau 截止频率(Hz)：越低越平滑但可
 prep_opts.tau_lowpass_order = 2;  % tau 低通阶数：2 通常最稳健；升高可更强抑噪但可能带来过冲/振铃
 
 % τ_id 的“补偿项”开关：
-%   - 若你只想看低通效果，可以保持为空（默认等价于 tau_id ~ tau_s）
+%   - 若你只想看 SG + 低通效果，可以保持为空（默认等价于 tau_id ~ tau_s）
 prep_opts.J_eq = [];
 prep_opts.friction_params = [];
 prep_opts.tau_bias = [];
