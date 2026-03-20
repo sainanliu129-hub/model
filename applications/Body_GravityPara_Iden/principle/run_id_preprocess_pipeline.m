@@ -1,4 +1,4 @@
-function [t_out, q_out, qd_out, qdd_out, tau_out, aux, prep_used] = run_id_preprocess_pipeline(t, q, qd, tau, prep_opts)
+function [data_before, data_after, prep_used] = run_id_preprocess_pipeline(csv_file, prep_opts)
 % run_id_preprocess_pipeline  预处理统一入口：低通滤波 + 可选补偿（解耦辨识主流程）
 %
 % 目标：
@@ -17,9 +17,11 @@ function [t_out, q_out, qd_out, qdd_out, tau_out, aux, prep_used] = run_id_prepr
 %     n_joints, row_for_joint, friction_iden_dir
 %
 % 输出：
-%   tau_out 为 preprocess_id_data 输出的 tau_id（若 do_compensation=false，则 tau_id≈tau_s）
+%   data_before: 预处理前的原始数据，结构体包含 .t, .q, .qd, .qdd, .tau
+%   data_after:  预处理后的数据，结构体包含 .t, .q, .qd, .qdd, .tau_id, .tau_s
+%   prep_used:   实际使用的预处理选项
 
-if nargin < 5
+if nargin < 2
     prep_opts = struct();
 end
 
@@ -38,6 +40,38 @@ if ~isfield(prep, 'n_joints'), prep.n_joints = 6; end
 if ~isfield(prep, 'row_for_joint'), prep.row_for_joint = []; end
 if ~isfield(prep, 'friction_iden_dir'), prep.friction_iden_dir = ''; end
 
+% 读取 raw
+raw = read_leg_joint_csv(csv_file);
+t = raw.time(:);
+q = raw.pos_leg_l;
+qd = raw.vel_leg_l;
+tau = raw.torque_leg_l;
+
+% 预处理前：中心差分 qdd + 时间窗裁剪（与 preprocess 一致）
+N = length(t);
+dt = median(diff(t));
+if dt <= 0 || isnan(dt), dt = 0.002; end
+qdd_before_full = zeros(N, 6);
+for j = 1:6
+    for k = 1:N
+        qdd_before_full(k, j) = central_diff_point(qd(:, j), t, k, dt);
+    end
+end
+
+idx_win = true(N, 1);
+if ~isempty(prep.t_start_s), idx_win = idx_win & (t >= prep.t_start_s); end
+if ~isempty(prep.t_end_s), idx_win = idx_win & (t <= prep.t_end_s); end
+bad = any(~isfinite(q), 2) | any(~isfinite(tau), 2);
+idx_win = idx_win & ~bad;
+
+data_before = struct();
+data_before.t = t(idx_win);
+data_before.q = q(idx_win, :);
+data_before.qd = qd(idx_win, :);
+data_before.qdd = qdd_before_full(idx_win, :);
+data_before.tau = tau(idx_win, :);
+
+% 预处理后
 if prep.do_compensation
     if prep.load_friction_from_summary
         friction_iden_dir = prep.friction_iden_dir;
@@ -65,7 +99,16 @@ else
     prep.tau_bias = [];
 end
 
-[t_out, q_out, qd_out, qdd_out, tau_out, aux] = preprocess_id_data(t, q, qd, tau, prep);
-prep_used = prep;
-end
+[t_after, q_after, qd_after, qdd_after, tau_id_after, aux] = preprocess_id_data(t, q, qd, tau, prep);
 
+data_after = struct();
+data_after.t = t_after;
+data_after.q = q_after;
+data_after.qd = qd_after;
+data_after.qdd = qdd_after;
+data_after.tau_id = tau_id_after;
+data_after.tau_s = aux.tau_s;
+
+prep_used = prep;
+
+end

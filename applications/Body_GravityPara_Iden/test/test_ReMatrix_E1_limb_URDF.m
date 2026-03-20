@@ -58,7 +58,7 @@ theta  = get_limb_theta_from_URDF(robot_limb, para_order);
 use_beta_full = true;
 if use_beta_full
     pi_cad = theta;
-    result_mat = fullfile(app_root, 'min_param_id_result.mat');
+    result_mat = fullfile(app_root, 'build', 'min_param_id_result.mat');
     if isfile(result_mat)
         ld = load(result_mat);
         if isfield(ld, 'X_hat') && isfield(ld, 'index_base') && isfield(ld, 'avg_data')

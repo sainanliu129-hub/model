@@ -26,6 +26,7 @@ switch method
         required = {'pi_cad'};
         assert_required(opts, required, 'identify_params_dispatch(full_fd)');
         fd_opts = get_field_or(opts, 'identify_full_fd_opts', struct());
+        fprintf('[identify_params_dispatch] 调用 identify_full_params_for_fd...\n');
         [pi_fd, info] = identify_full_params_for_fd( ...
             dataset.q, dataset.qd, dataset.qdd, dataset.tau, ...
             opts.pi_cad, limb, para_order, fd_opts);

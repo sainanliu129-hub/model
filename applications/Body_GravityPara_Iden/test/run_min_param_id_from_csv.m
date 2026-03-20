@@ -88,34 +88,39 @@ end
 fprintf('===== 最小参数辨识流程（低通预处理 + 连续窗 → 辨识 → FD） =====\n');
 fprintf('数据文件: %s\n', csv_file);
 
-%% 读取数据（单腿：左腿 6 关节）
-data = read_leg_joint_csv(csv_file);
-t   = data.time(:);
-q   = data.pos_leg_l;    % N×6
-qd  = data.vel_leg_l;   % N×6
-tau = data.torque_leg_l; % N×6
 
 if size(q,1) ~= length(t) || size(tau,1) ~= length(t)
     error('时间与 q/tau 行数不一致。');
 end
 
 % 可选：辨识前预处理（统一低通链路）
-qdd_for_win = [];   % 若预处理则传入 qdd_s，避免窗内重算
-if opts.use_preprocess_id
-    prep = opts.prep_opts;
-    if ~isfield(prep, 't_start_s'), prep.t_start_s = 2.1; end
-    if ~isfield(prep, 't_end_s'),   prep.t_end_s   = 4.1; end
-    if ~isfield(prep, 'q_lowpass_fc_Hz'), prep.q_lowpass_fc_Hz = 25; end
-    if ~isfield(prep, 'q_lowpass_order'), prep.q_lowpass_order = 2; end
-    if ~isfield(prep, 'tau_lowpass_fc_Hz'), prep.tau_lowpass_fc_Hz = 25; end
-    if ~isfield(prep, 'tau_lowpass_order'), prep.tau_lowpass_order = 2; end
-    if ~isfield(prep, 'do_plot'),   prep.do_plot = false; end
-
-    [t, q, qd, qdd_for_win, tau, aux_prep, prep_opts_used] = run_id_preprocess_pipeline(t, q, qd, tau, prep);
+    [data_before, data_after, prep_opts_used] = run_id_preprocess_pipeline(csv_file, prep);
+    t = data_after.t;
+    q = data_after.q;
+    qd = data_after.qd;
+    tau = data_after.tau_id; % 辨识通常用 tau_id
+    qdd_for_win = data_after.qdd;
+    
     if isfield(prep_opts_used, 'do_compensation') && prep_opts_used.do_compensation
         fprintf('  已做预处理（低通+可选补偿）：q低通+差分，τ低通，且已启用补偿项\n');
     else
         fprintf('  已做预处理（仅低通）：q低通+差分，τ低通（未启用补偿）\n');
+    end
+else % 如果不使用预处理，则需要手动读取数据并计算 qdd_for_win
+    raw = read_leg_joint_csv(csv_file);
+    t   = raw.time(:);
+    q   = raw.pos_leg_l;
+    qd  = raw.vel_leg_l;
+    tau = raw.torque_leg_l; % 原始 tau
+
+    N = length(t);
+    dt = median(diff(t));
+    if dt <= 0 || isnan(dt), dt = 0.002; end
+    qdd_for_win = zeros(N, 6);
+    for j = 1:6
+        for k = 1:N
+            qdd_for_win(k,j) = central_diff_point(qd(:,j), t, k, dt);
+        end
     end
 end
 
@@ -183,65 +188,9 @@ if M < 1
     error('辨识用数据点数为 0，请检查时间窗与数据有效段。');
 end
 
-%% Step1：裁减后轨迹辨识矩阵条件数（与 identify_min 同源：Y 列归一化 + QR 选列）
-fprintf('\n--- Step1: 条件数（cond(Y_min) 最重要） ---\n');
-try
-    q_bar  = avg_data.q_bar;
-    qd_bar = avg_data.qd_bar;
-    qdd_bar = avg_data.qdd_bar;
-    [Mm, nn] = size(q_bar);
-    Y_full = [];
-    for k = 1:Mm
-        Y_one = ReMatrix_E1_limb_URDF('left_leg', q_bar(k,:), qd_bar(k,:), qdd_bar(k,:), 1, 1);
-        Y_full = [Y_full; Y_one];
-    end
-    col_norm = sqrt(sum(Y_full.^2, 1));
-    col_norm(col_norm < 1e-12) = 1;
-    W_norm = Y_full ./ (ones(size(Y_full,1), 1) * col_norm);
-    r_cond = rank(W_norm);
-    [~, ~, piv_cond] = qr(W_norm, 'vector');
-    index_base_cond = sort(piv_cond(1:r_cond));
-    Y_min_cond = Y_full(:, index_base_cond);
-    cond_Y_full = cond(Y_full);   % 注意：Y_full 为冗余全参回归矩阵，可能秩亏，仅作参考
-    cond_Y_min  = cond(Y_min_cond);
-    cond_Wmin   = cond(W_norm(:, index_base_cond));
-    fprintf('  样本数 M = %d，时间 %.2f～%.2f s\n', Mm, t_equiv(1), t_equiv(end));
-    fprintf('  cond(Y_full)     = %.4e  （全参 60 列，可能秩亏，仅作参考）\n', cond_Y_full);
-    fprintf('  cond(Y_min)      = %.4e  （最小参数 %d 列）【最重要】\n', cond_Y_min, numel(index_base_cond));
-    fprintf('  cond(W_min)      = %.4e  （列归一化后最小参数）\n', cond_Wmin);
-catch ME
-    fprintf('  条件数计算失败: %s\n', ME.message);
-end
-fprintf('-----------------------------------\n');
+%% 1. 回归矩阵属性分析（条件数与回归量能量）
+    [analysis_results, fig_regressor_energy] = analyze_regressor_properties(avg_data, 'left_leg', 1, t_equiv);
 
-%% Step2: Regressor energy ||Y(:,i)||（列范数 ≈0 表示该参数未被激励）
-fprintf('\n--- Step2: Regressor energy（各参数列范数） ---\n');
-try
-    if ~exist('Y_full', 'var')
-        error('Y_full 未定义（Step1 条件数未成功时跳过）');
-    end
-    ncol = size(Y_full, 2);
-    regressor_energy = sqrt(sum(Y_full.^2, 1));   % 1×ncol, ||Y(:,i)||_2
-    fprintf('  全参列数 = %d，||Y(:,i)||_2 最小值 = %.4e，最大值 = %.4e\n', ncol, min(regressor_energy), max(regressor_energy));
-    idx_near_zero = find(regressor_energy < 1e-6 * max(regressor_energy));
-    if ~isempty(idx_near_zero)
-        fprintf('  列范数近似为 0 的列（未被激励）: %s\n', mat2str(idx_near_zero));
-    end
-    fig_reg = figure('Name', 'Regressor_energy', 'Position', [160 160 1000 400]);
-    bar(1:ncol, regressor_energy, 'FaceColor', [0.3 0.5 0.8]);
-    xlabel('参数列 i'); ylabel('||Y(:,i)||_2');
-    title('Regressor energy：列范数 \approx 0 表示该参数未被激励');
-    grid on;
-    hold on;
-    if ~isempty(idx_near_zero)
-        plot(idx_near_zero, regressor_energy(idx_near_zero), 'ro', 'MarkerSize', 8, 'LineWidth', 1.5);
-        legend('||Y(:,i)||', '近似为 0（未激励）', 'Location', 'best');
-    end
-    hold off;
-catch ME
-    fprintf('  Regressor energy 计算/绘图失败: %s\n', ME.message);
-end
-fprintf('-----------------------------------\n');
 
 %% 图2：辨识用数据（等效时间 = 连续窗时间）
 fig2 = figure('Name', '辨识用数据', 'Position', [100, 100, 1200, 800]);
@@ -299,9 +248,9 @@ end
 sgtitle(sprintf('最小参数辨识：测量 vs 预测（时间跨度 %.2f s）', t_span));
 
 %% 3b. 多版本力矩对比：牛顿-欧拉刚体 / 刚体+摩擦+转子 / 辨识力矩 vs 实际力矩
-if opts.use_preprocess_id && exist('aux_prep', 'var')
+if opts.use_preprocess_id && exist('data_after', 'var')
     % 以预处理后的零相位力矩 tau_s 作为“实际力矩”（已滤波、未减摩擦/转子）
-    tau_meas_win = aux_prep.tau_s;
+    tau_meas_win = data_after.tau_s;
     M_meas = size(tau_meas_win, 1);
     if M_meas ~= M
         % 时间长度不一致时，简单截断到共同长度
@@ -333,14 +282,9 @@ if opts.use_preprocess_id && exist('aux_prep', 'var')
     end
 
     % 2) 牛顿-欧拉 + 预处理补偿项（来自 prep_opts/aux_prep）
+    % 2) 牛顿-欧拉 + 预处理补偿项（由于 aux_prep 已移除，此处暂时不考虑补偿项的显式获取）
     tau_comp_ne = zeros(M_plot, 6);
-    if isfield(aux_prep, 'tau_comp') && ~isempty(aux_prep.tau_comp)
-        if size(aux_prep.tau_comp, 1) >= M_plot
-            tau_comp_ne = aux_prep.tau_comp(1:M_plot, :);
-        else
-            tau_comp_ne(1:size(aux_prep.tau_comp, 1), :) = aux_prep.tau_comp;
-        end
-    end
+    % 如果需要补偿项，需在 run_id_preprocess_pipeline 中返回或重新计算。
     tau_ne_plus = tau_ne + tau_comp_ne;
 
     % 3) 误差（全部以滤波后的“实际力矩” tau_meas_win 为基准）
@@ -395,7 +339,7 @@ fprintf('forward_dynamics_min 输出 qdd (rad/s^2): '); fprintf(' %.4f', qdd_fd)
 
 %% 5. 可选：保存结果供后续 FD/ID 验证使用（含 prep_opts 便于复现同一预处理）
 out_mat = fullfile(app_root, 'min_param_id_result.mat');
-if ~isempty(prep_opts_used)
+if opts.use_preprocess_id
     prep_opts = prep_opts_used;   % 保存为 prep_opts 供 run_full_dynamics_validation / 调试脚本复用
     save(out_mat, 'X_hat', 'index_base', 'avg_data', 'metrics', 'prep_opts');
     fprintf('\n已保存 X_hat, index_base, avg_data, metrics, prep_opts 到: %s\n', out_mat);
