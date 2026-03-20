@@ -18,6 +18,10 @@ limb = 'left_leg';
 para_order = 1;
 do_plot = true;
 M_fd_max = inf;
+% 仅依赖 step4/step5；step2/step3 的配置复用默认关闭
+reuse_step2_prep = false;
+reuse_step3_window = false;
+select_step4_step5_by_dialog = false; % true: 手动选择参数文件；false: 用 build 下默认文件
 
 build_dir = fullfile(app_root, 'build');
 step2_mat = fullfile(build_dir, 'step2_preprocessed.mat');
@@ -25,8 +29,20 @@ step3_mat = fullfile(build_dir, 'step3_dataset.mat');
 step4_mat = fullfile(build_dir, 'step4_res_min.mat');
 step5_mat = fullfile(build_dir, 'step5_full_params.mat');
 
-if ~isfile(step4_mat) || ~isfile(step5_mat)
-    error('缺少参数文件：请先确保 %s 和 %s 存在。', step4_mat, step5_mat);
+if select_step4_step5_by_dialog
+    [f4, p4] = uigetfile('*.mat', '选择 step4_res_min.mat');
+    if isequal(f4, 0), error('未选择 step4 参数文件，已取消。'); end
+    step4_mat = fullfile(p4, f4);
+    [f5, p5] = uigetfile('*.mat', '选择 step5_full_params.mat');
+    if isequal(f5, 0), error('未选择 step5 参数文件，已取消。'); end
+    step5_mat = fullfile(p5, f5);
+end
+
+if ~isfile(step4_mat)
+    error('缺少 step4 参数文件: %s', step4_mat);
+end
+if ~isfile(step5_mat)
+    error('缺少 step5 参数文件: %s', step5_mat);
 end
 
 %% 2) 选择 CSV 文件（可改成固定路径）
@@ -71,7 +87,7 @@ prep_opts = struct( ...
     'tau_lowpass_order', 2, ...
     'do_compensation', false, ...
     'do_plot', false);
-if isfile(step2_mat)
+if reuse_step2_prep && isfile(step2_mat)
     S2 = load(step2_mat);
     if isfield(S2, 'prep_used') && ~isempty(S2.prep_used)
         prep_opts = S2.prep_used;
@@ -79,7 +95,7 @@ if isfile(step2_mat)
 end
 
 window_opts = struct('t_start_s', [], 't_end_s', [], 'qd_lowpass_fc_Hz', 0, 'qdd_smooth_half', 0);
-if isfile(step3_mat)
+if reuse_step3_window && isfile(step3_mat)
     S3 = load(step3_mat);
     if isfield(S3, 'meta') && isfield(S3.meta, 'window_used') && ~isempty(S3.meta.window_used)
         window_opts = S3.meta.window_used;
