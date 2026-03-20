@@ -77,7 +77,21 @@ for i = 1 : nDof
     xlabel(label_x{i});
     ylabel(label_y{i});
 end
-suptitle(label_title);
+local_apply_super_title(label_title);
+function local_apply_super_title(txt)
+% 兼容不同 MATLAB 版本：优先 sgtitle，其次 suptitle，最后 annotation
+if exist('sgtitle', 'file') == 2 || exist('sgtitle', 'builtin') == 5
+    sgtitle(txt);
+    return;
+end
+if exist('suptitle', 'file') == 2 || exist('suptitle', 'builtin') == 5
+    suptitle(txt);
+    return;
+end
+annotation('textbox', [0 0.96 1 0.04], ...
+    'String', txt, 'EdgeColor', 'none', ...
+    'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+end
     
 
 

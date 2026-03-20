@@ -65,6 +65,9 @@ prep_opts.plot_joints = plot_joints;
 % 中间差分（预处理前）对齐用：与 run_min_param_id_from_csv 一致
 use_central_diff = true;
 
+% 是否只看 qd/qdd（不画 q/tau）
+only_show_qd_qdd_compare = false;
+
 % 保存图（可选）
 save_png = false;
 out_dir = fullfile(app_root, '..', 'fig_png');
@@ -180,52 +183,54 @@ else
 end
 
 %% 4) 绘图：q/qd/qdd/tau 四行对比（列=关节）
-figure('Name', 'Preprocess_Before_After_trajectories', 'Position', [60, 60, 1500, 900]);
-for ii = 1:nj
-    j = plot_joints(ii);
+if ~only_show_qd_qdd_compare
+    figure('Name', 'Preprocess_Before_After_trajectories', 'Position', [60, 60, 1500, 900]);
+    for ii = 1:nj
+        j = plot_joints(ii);
 
-    % q
-    subplot(4, nj, ii);
-    plot(t_before, q_before(:, j), 'Color', [0.7 0.7 0.7], 'LineWidth', 0.8); hold on;
-    plot(t_after,  q_after(:, j),  'b', 'LineWidth', 1.1);
-    xlabel('t (s)'); ylabel('q (rad)'); title(sprintf('q joint%d', j));
-    legend({'before (raw)', q_after_label}, 'Location', 'best'); grid on; hold off;
+        % q
+        subplot(4, nj, ii);
+        plot(t_before, q_before(:, j), 'Color', [0.7 0.7 0.7], 'LineWidth', 0.8); hold on;
+        plot(t_after,  q_after(:, j),  'b', 'LineWidth', 1.1);
+        xlabel('t (s)'); ylabel('q (rad)'); title(sprintf('q joint%d', j));
+        legend({'before (raw)', q_after_label}, 'Location', 'best'); grid on; hold off;
 
-    % qd
-    subplot(4, nj, nj + ii);
-    plot(t_before, qd_before(:, j), 'Color', [0.7 0.7 0.7], 'LineWidth', 0.8); hold on;
-    plot(t_after,  qd_after(:, j),  'b', 'LineWidth', 1.1);
-    xlabel('t (s)'); ylabel('qd (rad/s)'); title(sprintf('qd joint%d', j));
-    legend({'before (CSV)', qd_after_label}, 'Location', 'best'); grid on; hold off;
+        % qd
+        subplot(4, nj, nj + ii);
+        plot(t_before, qd_before(:, j), 'Color', [0.7 0.7 0.7], 'LineWidth', 0.8); hold on;
+        plot(t_after,  qd_after(:, j),  'b', 'LineWidth', 1.1);
+        xlabel('t (s)'); ylabel('qd (rad/s)'); title(sprintf('qd joint%d', j));
+        legend({'before (CSV)', qd_after_label}, 'Location', 'best'); grid on; hold off;
 
-    % qdd
-    subplot(4, nj, 2*nj + ii);
-    plot(t_before, qdd_before(:, j), 'Color', [0.7 0.7 0.7], 'LineWidth', 0.8); hold on;
-    plot(t_after,  qdd_after(:, j),  'b', 'LineWidth', 1.1);
-    xlabel('t (s)'); ylabel('qdd (rad/s^2)'); title(sprintf('qdd joint%d', j));
-    legend({'before (central diff)', qdd_after_label}, 'Location', 'best'); grid on; hold off;
+        % qdd
+        subplot(4, nj, 2*nj + ii);
+        plot(t_before, qdd_before(:, j), 'Color', [0.7 0.7 0.7], 'LineWidth', 0.8); hold on;
+        plot(t_after,  qdd_after(:, j),  'b', 'LineWidth', 1.1);
+        xlabel('t (s)'); ylabel('qdd (rad/s^2)'); title(sprintf('qdd joint%d', j));
+        legend({'before (central diff)', qdd_after_label}, 'Location', 'best'); grid on; hold off;
 
-    % tau
-    subplot(4, nj, 3*nj + ii);
-    plot(t_before, tau_before(:, j), 'Color', [0.7 0.7 0.7], 'LineWidth', 0.8); hold on;
-    plot(t_after,  tau_s_after(:, j), 'b', 'LineWidth', 1.1);
-    plot(t_after,  tau_id_after(:, j), 'k--', 'LineWidth', 1.0);
-    xlabel('t (s)'); ylabel('\tau (N\cdotm)'); title(sprintf('\\tau joint%d', j));
-    legend({'before (CSV)', 'after (tau\_s lowpass)', 'after (tau\_id target)'}, 'Location', 'best');
-    grid on; hold off;
+        % tau
+        subplot(4, nj, 3*nj + ii);
+        plot(t_before, tau_before(:, j), 'Color', [0.7 0.7 0.7], 'LineWidth', 0.8); hold on;
+        plot(t_after,  tau_s_after(:, j), 'b', 'LineWidth', 1.1);
+        plot(t_after,  tau_id_after(:, j), 'k--', 'LineWidth', 1.0);
+        xlabel('t (s)'); ylabel('\tau (N\cdotm)'); title(sprintf('\\tau joint%d', j));
+        legend({'before (CSV)', 'after (tau\_s lowpass)', 'after (tau\_id target)'}, 'Location', 'best');
+        grid on; hold off;
+    end
+
+    sgtitle(sprintf('预处理前后轨迹对比（%s, t=[%.2f, %.2f], %s, tau lowpass=%dHz）',...
+        limb, prep_opts.t_start_s, prep_opts.t_end_s, title_filter_desc, prep_opts.tau_lowpass_fc_Hz));
 end
-
-sgtitle(sprintf('预处理前后轨迹对比（%s, t=[%.2f, %.2f], %s, tau lowpass=%dHz）',...
-    limb, prep_opts.t_start_s, prep_opts.t_end_s, title_filter_desc, prep_opts.tau_lowpass_fc_Hz));
 
 %% 5) 可选保存
 if save_png
-    out_name = sprintf('preprocess_before_after_%s_t%.2fto%.2f_SG%d_%dHz.png', ...
-        limb, prep_opts.t_start_s, prep_opts.t_end_s, prep_opts.sg_order, prep_opts.tau_lowpass_fc_Hz);
+    out_name = sprintf('preprocess_before_after_%s_t%.2fto%.2f_qLP%gHz_tauLP%gHz.png', ...
+        limb, prep_opts.t_start_s, prep_opts.t_end_s, prep_opts.q_lowpass_fc_Hz, prep_opts.tau_lowpass_fc_Hz);
     out_path = fullfile(out_dir, out_name);
     fprintf('保存图: %s\n', out_path);
     saveas(gcf, out_path);
 end
 
-fprintf('完成：已绘制 q/qd/qdd/\\tau 的预处理前后对比。\n');
+fprintf('完成：已绘制 q/qd/qdd/\\tau 的预处理前后对比（仅保留 q 低通+差分链路）。\n');
 

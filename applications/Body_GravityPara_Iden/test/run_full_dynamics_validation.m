@@ -30,10 +30,31 @@ cfg.prep_opts = struct( ...
     'do_plot', false);
 cfg.window_opts = struct('t_start_s', [], 't_end_s', [], 'qd_lowpass_fc_Hz', 0, 'qdd_smooth_half', 0);
 
+% Step4 最小参数辨识调参（方案二推荐默认）
+cfg.min_id_opts = struct( ...
+    'use_wls', true, ...
+    'lambda_ridge', 1e-6);
+
+% Step5 物理恢复调参（面向 FD）
+cfg.phys_opts = struct( ...
+    'lambda_phys', 10, ...
+    'algorithm', 'sqp', ...
+    'max_iter', 1000, ...
+    'MaxFunctionEvaluations', 20000, ...
+    'display', 'iter', ...
+    'm_min_frac', 0.8, ...
+    'm_max_frac', 1.2, ...
+    'delta_c', 0.02, ...
+    'eps_pd', 1e-4, ...
+    'w_m', 1, ...
+    'w_h', 3, ...
+    'w_Idiag', 8, ...
+    'w_Ioff', 12);
+
 % 每一步是否强制重新计算（忽略缓存）
 cfg.force_recompute_step2 = false;
 cfg.force_recompute_step3 = false;
-cfg.force_recompute_step4 = false;
+cfg.force_recompute_step4 = true;
 cfg.force_recompute_step5 = true;
 cfg.force_recompute_step6 = true;
 cfg.force_recompute_step7 = true;
@@ -41,10 +62,13 @@ cfg.force_recompute_step7 = true;
 limb = 'left_leg';
 para_order = 1;
 run_pi_phys = true;
-run_pi_fd = true;
-M_fd_max = 200;
+run_pi_fd = false;
+M_fd_max = inf;
 save_excel = true;
 use_fast_fd_id_tuning = true; % true=快速调参档, false=标准档
+plot_id_compare = true;
+plot_fd_compare = false;
+export_id_plot_png_to_excel = true;
 
 fprintf('[run_full_dynamics_validation] 准备进入步骤5：CAD/full 参数辨识 (full_fd)\n');
 
@@ -146,7 +170,10 @@ fprintf('数据集: M=%d, t=[%.3f, %.3f]\n', size(dataset.q,1), dataset.t(1), da
 id_opts = struct();
 id_opts.limb = limb;
 id_opts.para_order = para_order;
-id_opts.identify_min_opts = struct('use_wls', false, 'para_order', para_order);
+id_opts.identify_min_opts = struct( ...
+    'use_wls', cfg.min_id_opts.use_wls, ...
+    'lambda', cfg.min_id_opts.lambda_ridge, ...
+    'para_order', para_order);
 
 load_step4 = false;
 if ~cfg.force_recompute_step4 && isfile(step4_mat)
@@ -170,11 +197,14 @@ if ~load_step4
     save(step4_mat, 'res_min', 'X_hat', 'index_base', 'csv_file');
     fprintf('步骤4已保存到: %s\n', step4_mat);
 end
+step4_changed = ~load_step4;
 fprintf('最小参数维度 p_min=%d\n', numel(X_hat));
+fprintf('Step4设置: use_wls=%d, lambda_ridge=%.3e\n', ...
+    cfg.min_id_opts.use_wls, cfg.min_id_opts.lambda_ridge);
 
 %% 5) 步骤5：CAD/full 参数
 load_step5 = false;
-if ~cfg.force_recompute_step5 && isfile(step5_mat)
+if ~cfg.force_recompute_step5 && ~step4_changed && isfile(step5_mat)
     try
         S5 = load(step5_mat);
         if isfield(S5, 'csv_file') && isequal(S5.csv_file, csv_file)
@@ -201,8 +231,21 @@ if ~load_step5
 
     pi_phys = [];
     if run_pi_phys
-        opts_phys = struct('algorithm','sqp','max_iter',1000,'MaxFunctionEvaluations',20000,'display','iter');
-        [pi_phys, info_phys] = solve_full_params_physical(Y_full, Y_min, beta_hat, pi_cad, 10, opts_phys); %#ok<NASGU>
+        opts_phys = struct( ...
+            'algorithm', cfg.phys_opts.algorithm, ...
+            'max_iter', cfg.phys_opts.max_iter, ...
+            'MaxFunctionEvaluations', cfg.phys_opts.MaxFunctionEvaluations, ...
+            'display', cfg.phys_opts.display, ...
+            'm_min_frac', cfg.phys_opts.m_min_frac, ...
+            'm_max_frac', cfg.phys_opts.m_max_frac, ...
+            'delta_c', cfg.phys_opts.delta_c, ...
+            'eps_pd', cfg.phys_opts.eps_pd, ...
+            'w_m', cfg.phys_opts.w_m, ...
+            'w_h', cfg.phys_opts.w_h, ...
+            'w_Idiag', cfg.phys_opts.w_Idiag, ...
+            'w_Ioff', cfg.phys_opts.w_Ioff);
+        [pi_phys, info_phys] = solve_full_params_physical( ...
+            Y_full, Y_min, beta_hat, pi_cad, cfg.phys_opts.lambda_phys, opts_phys); %#ok<NASGU>
     end
 
     pi_fd = [];
@@ -268,6 +311,7 @@ if ~load_step5
         fprintf('\n[FD ID 解的目标分解(回归矩阵空间)] J_tau=%.6e, J_cad=%.6e\n', info_fd.J_tau, info_fd.J_cad);
     end
 end
+step5_changed = ~load_step5;
 [~, n] = get_e1_limb_robot(limb);
 
 %% 6) 步骤6：逆动力学对比
@@ -290,29 +334,42 @@ if ~cfg.force_recompute_step6 && isfile(step6_mat)
         fprintf('加载步骤6失败 (%s)，将重新计算。\n', ME.message);
     end
 end
+tau_meas = dataset.tau;
 if ~load_step6
-    tau_meas = dataset.tau;
     tau_cad = zeros(M, n);
     tau_min = zeros(M, n);
     tau_rec = zeros(M, n);
     tau_phys = zeros(M, n);
     tau_fd = zeros(M, n);
+end
+if ~exist('tau_cad','var') || isempty(tau_cad), tau_cad = zeros(M, n); end
+if ~exist('tau_min','var') || isempty(tau_min), tau_min = zeros(M, n); end
+if ~exist('tau_rec','var') || isempty(tau_rec), tau_rec = zeros(M, n); end
+if ~exist('tau_phys','var') || isempty(tau_phys), tau_phys = zeros(M, n); end
+if ~exist('tau_fd','var') || isempty(tau_fd), tau_fd = zeros(M, n); end
 
+recalc_id_cad  = cfg.force_recompute_step6 || ~load_step6;
+recalc_id_min  = recalc_id_cad || step4_changed;
+recalc_id_rec  = recalc_id_cad || step5_changed;
+recalc_id_phys = recalc_id_cad || step5_changed;
+recalc_id_fd   = recalc_id_cad || step5_changed;
+
+if recalc_id_cad || recalc_id_min || recalc_id_rec || (recalc_id_phys && ~isempty(pi_phys)) || (recalc_id_fd && ~isempty(pi_fd))
     model_cad_id = struct('type','full','limb',limb,'para_order',para_order,'pi_vec',pi_cad);
     model_min_id = struct('type','min','limb',limb,'para_order',para_order,'X_hat',X_hat,'index_base',index_base);
     model_rec_id = struct('type','full','limb',limb,'para_order',para_order,'pi_vec',pi_rec);
     if ~isempty(pi_phys), model_phys_id = struct('type','full','limb',limb,'para_order',para_order,'pi_vec',pi_phys); end
     if ~isempty(pi_fd), model_fd_id = struct('type','full','limb',limb,'para_order',para_order,'pi_vec',pi_fd); end
 
+    fprintf('步骤6增量重算: CAD=%d, MIN=%d, REC=%d, PHYS=%d, FD=%d\n', ...
+        recalc_id_cad, recalc_id_min, recalc_id_rec, recalc_id_phys && ~isempty(pi_phys), recalc_id_fd && ~isempty(pi_fd));
     for k = 1:M
-        tau_cad(k,:) = inverse_dynamics_dispatch(dataset.q(k,:), dataset.qd(k,:), dataset.qdd(k,:), model_cad_id).';
-        tau_min(k,:) = inverse_dynamics_dispatch(dataset.q(k,:), dataset.qd(k,:), dataset.qdd(k,:), model_min_id).';
-        tau_rec(k,:) = inverse_dynamics_dispatch(dataset.q(k,:), dataset.qd(k,:), dataset.qdd(k,:), model_rec_id).';
-        if ~isempty(pi_phys), tau_phys(k,:) = inverse_dynamics_dispatch(dataset.q(k,:), dataset.qd(k,:), dataset.qdd(k,:), model_phys_id).'; end
-        if ~isempty(pi_fd), tau_fd(k,:) = inverse_dynamics_dispatch(dataset.q(k,:), dataset.qd(k,:), dataset.qdd(k,:), model_fd_id).'; end
+        if recalc_id_cad, tau_cad(k,:) = inverse_dynamics_dispatch(dataset.q(k,:), dataset.qd(k,:), dataset.qdd(k,:), model_cad_id).'; end
+        if recalc_id_min, tau_min(k,:) = inverse_dynamics_dispatch(dataset.q(k,:), dataset.qd(k,:), dataset.qdd(k,:), model_min_id).'; end
+        if recalc_id_rec, tau_rec(k,:) = inverse_dynamics_dispatch(dataset.q(k,:), dataset.qd(k,:), dataset.qdd(k,:), model_rec_id).'; end
+        if recalc_id_phys && ~isempty(pi_phys), tau_phys(k,:) = inverse_dynamics_dispatch(dataset.q(k,:), dataset.qd(k,:), dataset.qdd(k,:), model_phys_id).'; end
+        if recalc_id_fd && ~isempty(pi_fd), tau_fd(k,:) = inverse_dynamics_dispatch(dataset.q(k,:), dataset.qd(k,:), dataset.qdd(k,:), model_fd_id).'; end
     end
-
-    % 步骤6 保存最终版
     save(step6_mat, 'tau_meas', 'tau_cad', 'tau_min', 'tau_rec', 'tau_phys', 'tau_fd', 'csv_file');
     fprintf('步骤6已保存到: %s\n', step6_mat);
 end
@@ -331,12 +388,15 @@ fprintf('  REC :'); fprintf(' %.3f', max(abs(tau_rec-tau_meas), [], 1)); fprintf
 if ~isempty(pi_phys), fprintf('  PHYS:'); fprintf(' %.3f', max(abs(tau_phys-tau_meas), [], 1)); fprintf('\n'); end
 if ~isempty(pi_fd), fprintf('  FD  :'); fprintf(' %.3f', max(abs(tau_fd-tau_meas), [], 1)); fprintf('\n'); end
 
-plot_data = [tau_meas, tau_cad, tau_min, tau_rec];
-legend_txt = {'\tau_{meas}','Y\pi_{cad}','Y_{min}X_{hat}','Y\pi_{rec}'};
-if ~isempty(pi_phys), plot_data = [plot_data, tau_phys]; legend_txt{end+1} = 'Y\pi_{phys}'; end %#ok<AGROW>
-if ~isempty(pi_fd), plot_data = [plot_data, tau_fd]; legend_txt{end+1} = 'Y\pi_{fd}'; end %#ok<AGROW>
-plot_compare_with_error_6dof((1:M)', tau_meas, '\tau_{meas}', ...
-    plot_data(:, 7:end), legend_txt(2:end), 'torque', '逆动力学多模型');
+id_figs = struct();
+if plot_id_compare
+    plot_data = [tau_meas, tau_cad];
+    legend_txt = {'\tau_{meas}','Y\pi_{cad}'};
+    if ~isempty(pi_phys), plot_data = [plot_data, tau_phys]; legend_txt{end+1} = 'Y\pi_{phys}'; end %#ok<AGROW>
+    if ~isempty(pi_fd), plot_data = [plot_data, tau_fd]; legend_txt{end+1} = 'Y\pi_{fd}'; end %#ok<AGROW>
+    id_figs = plot_compare_with_error_6dof((1:M)', tau_meas, '\tau_{meas}', ...
+        plot_data(:, 7:end), legend_txt(2:end), 'torque', '逆动力学多模型');
+end
 
 %% 7) 步骤7：正动力学对比
 M_fd = min(M, M_fd_max);
@@ -365,48 +425,56 @@ if ~cfg.force_recompute_step7 && isfile(step7_mat)
         fprintf('加载步骤7失败 (%s)，将重新计算。\n', ME.message);
     end
 end
+t_fd = dataset.t(1:M_fd);
+qd_ref = dataset.qd(1:M_fd,:);
+qdd_ref = dataset.qdd(1:M_fd,:);
 if ~load_step7
-    t_fd = dataset.t(1:M_fd);
-    qd_ref = dataset.qd(1:M_fd,:);
-    qdd_ref = dataset.qdd(1:M_fd,:);
-    qdd_cad = zeros(M_fd,n);
-    qdd_min = zeros(M_fd,n);
-    qdd_rec = zeros(M_fd,n);
-    qdd_phys = zeros(M_fd,n);
-    qdd_fd = zeros(M_fd,n);
+    qdd_cad = zeros(M_fd,n); qdd_min = zeros(M_fd,n); qdd_rec = zeros(M_fd,n); qdd_phys = zeros(M_fd,n); qdd_fd = zeros(M_fd,n);
+    qd_cad = zeros(M_fd,n); qd_min = zeros(M_fd,n); qd_rec = zeros(M_fd,n); qd_phys = zeros(M_fd,n); qd_fd = zeros(M_fd,n);
+end
+if ~exist('qdd_cad','var') || isempty(qdd_cad), qdd_cad = zeros(M_fd,n); end
+if ~exist('qdd_min','var') || isempty(qdd_min), qdd_min = zeros(M_fd,n); end
+if ~exist('qdd_rec','var') || isempty(qdd_rec), qdd_rec = zeros(M_fd,n); end
+if ~exist('qdd_phys','var') || isempty(qdd_phys), qdd_phys = zeros(M_fd,n); end
+if ~exist('qdd_fd','var') || isempty(qdd_fd), qdd_fd = zeros(M_fd,n); end
+if ~exist('qd_cad','var') || isempty(qd_cad), qd_cad = zeros(M_fd,n); end
+if ~exist('qd_min','var') || isempty(qd_min), qd_min = zeros(M_fd,n); end
+if ~exist('qd_rec','var') || isempty(qd_rec), qd_rec = zeros(M_fd,n); end
+if ~exist('qd_phys','var') || isempty(qd_phys), qd_phys = zeros(M_fd,n); end
+if ~exist('qd_fd','var') || isempty(qd_fd), qd_fd = zeros(M_fd,n); end
 
+recalc_fd_cad  = cfg.force_recompute_step7 || ~load_step7;
+recalc_fd_min  = recalc_fd_cad || step4_changed;
+recalc_fd_rec  = recalc_fd_cad || step5_changed;
+recalc_fd_phys = recalc_fd_cad || step5_changed;
+recalc_fd_fd   = recalc_fd_cad || step5_changed;
+
+if recalc_fd_cad || recalc_fd_min || recalc_fd_rec || (recalc_fd_phys && ~isempty(pi_phys)) || (recalc_fd_fd && ~isempty(pi_fd))
     model_cad_fd = struct('type','urdf','limb',limb,'para_order',para_order);
     model_min_fd = struct('type','min','limb',limb,'para_order',para_order,'X_hat',X_hat,'index_base',index_base);
     model_rec_fd = struct('type','full','limb',limb,'para_order',para_order,'pi_vec',pi_rec);
     if ~isempty(pi_phys), model_phys_fd = struct('type','full','limb',limb,'para_order',para_order,'pi_vec',pi_phys); end
     if ~isempty(pi_fd), model_fd_fd = struct('type','full','limb',limb,'para_order',para_order,'pi_vec',pi_fd); end
 
+    fprintf('步骤7增量重算: CAD=%d, MIN=%d, REC=%d, PHYS=%d, FD=%d\n', ...
+        recalc_fd_cad, recalc_fd_min, recalc_fd_rec, recalc_fd_phys && ~isempty(pi_phys), recalc_fd_fd && ~isempty(pi_fd));
     for k = 1:M_fd
         qk = dataset.q(k,:); qdk = dataset.qd(k,:); tauk = dataset.tau(k,:);
-        qdd_cad(k,:) = forward_dynamics_dispatch(qk, qdk, tauk, model_cad_fd, struct()).';
-        qdd_min(k,:) = forward_dynamics_dispatch(qk, qdk, tauk, model_min_fd, struct()).';
-        qdd_rec(k,:) = forward_dynamics_dispatch(qk, qdk, tauk, model_rec_fd, struct()).';
-        if ~isempty(pi_phys), qdd_phys(k,:) = forward_dynamics_dispatch(qk, qdk, tauk, model_phys_fd, struct()).'; end
-        if ~isempty(pi_fd), qdd_fd(k,:) = forward_dynamics_dispatch(qk, qdk, tauk, model_fd_fd, struct()).'; end
+        if recalc_fd_cad, qdd_cad(k,:) = forward_dynamics_dispatch(qk, qdk, tauk, model_cad_fd, struct()).'; end
+        if recalc_fd_min, qdd_min(k,:) = forward_dynamics_dispatch(qk, qdk, tauk, model_min_fd, struct()).'; end
+        if recalc_fd_rec, qdd_rec(k,:) = forward_dynamics_dispatch(qk, qdk, tauk, model_rec_fd, struct()).'; end
+        if recalc_fd_phys && ~isempty(pi_phys), qdd_phys(k,:) = forward_dynamics_dispatch(qk, qdk, tauk, model_phys_fd, struct()).'; end
+        if recalc_fd_fd && ~isempty(pi_fd), qdd_fd(k,:) = forward_dynamics_dispatch(qk, qdk, tauk, model_fd_fd, struct()).'; end
     end
+end
 
-    % 由 qdd 积分得到 qd（用于正动力学速度对比）
-    qd_cad = zeros(M_fd, n); qd_cad(1,:) = qd_ref(1,:);
-    qd_min = zeros(M_fd, n); qd_min(1,:) = qd_ref(1,:);
-    qd_rec = zeros(M_fd, n); qd_rec(1,:) = qd_ref(1,:);
-    qd_phys = zeros(M_fd, n); qd_phys(1,:) = qd_ref(1,:);
-    qd_fd = zeros(M_fd, n); qd_fd(1,:) = qd_ref(1,:);
-    for k = 2:M_fd
-        dt_k = t_fd(k) - t_fd(k-1);
-        if dt_k <= 0 || isnan(dt_k), dt_k = median(diff(t_fd)); end
-        qd_cad(k,:) = qd_cad(k-1,:) + dt_k * qdd_cad(k-1,:);
-        qd_min(k,:) = qd_min(k-1,:) + dt_k * qdd_min(k-1,:);
-        qd_rec(k,:) = qd_rec(k-1,:) + dt_k * qdd_rec(k-1,:);
-        if ~isempty(pi_phys), qd_phys(k,:) = qd_phys(k-1,:) + dt_k * qdd_phys(k-1,:); end
-        if ~isempty(pi_fd), qd_fd(k,:) = qd_fd(k-1,:) + dt_k * qdd_fd(k-1,:); end
-    end
+if recalc_fd_cad,  qd_cad = integrate_qd_from_qdd(t_fd, qd_ref(1,:), qdd_cad); end
+if recalc_fd_min,  qd_min = integrate_qd_from_qdd(t_fd, qd_ref(1,:), qdd_min); end
+if recalc_fd_rec,  qd_rec = integrate_qd_from_qdd(t_fd, qd_ref(1,:), qdd_rec); end
+if recalc_fd_phys && ~isempty(pi_phys), qd_phys = integrate_qd_from_qdd(t_fd, qd_ref(1,:), qdd_phys); end
+if recalc_fd_fd && ~isempty(pi_fd), qd_fd = integrate_qd_from_qdd(t_fd, qd_ref(1,:), qdd_fd); end
 
-    % 步骤7 保存最终版
+if recalc_fd_cad || recalc_fd_min || recalc_fd_rec || (recalc_fd_phys && ~isempty(pi_phys)) || (recalc_fd_fd && ~isempty(pi_fd))
     save(step7_mat, 't_fd', 'qd_ref', 'qdd_ref', 'qd_cad', 'qd_min', 'qd_rec', 'qd_phys', 'qd_fd', ...
         'qdd_cad', 'qdd_min', 'qdd_rec', 'qdd_phys', 'qdd_fd', 'csv_file');
     fprintf('步骤7已保存到: %s\n', step7_mat);
@@ -426,19 +494,66 @@ fprintf('  REC :'); fprintf(' %.3f', sqrt(mean((qd_rec-qd_ref).^2,1))); fprintf(
 if ~isempty(pi_phys), fprintf('  PHYS:'); fprintf(' %.3f', sqrt(mean((qd_phys-qd_ref).^2,1))); fprintf('\n'); end
 if ~isempty(pi_fd), fprintf('  FD  :'); fprintf(' %.3f', sqrt(mean((qd_fd-qd_ref).^2,1))); fprintf('\n'); end
 
-plot_data_qd = [qd_ref, qd_cad, qd_min, qd_rec];
-legend_txt_qd = {'qd_{ref}','int(FD(CAD))','int(FD(\beta))','int(FD(\pi_{rec}))'};
-if ~isempty(pi_phys), plot_data_qd = [plot_data_qd, qd_phys]; legend_txt_qd{end+1} = 'int(FD(\pi_{phys}))'; end %#ok<AGROW>
-if ~isempty(pi_fd), plot_data_qd = [plot_data_qd, qd_fd]; legend_txt_qd{end+1} = 'int(FD(\pi_{fd}))'; end %#ok<AGROW>
-plot_compare_with_error_6dof(t_fd, qd_ref, 'qd_{ref}', ...
-    plot_data_qd(:, 7:end), legend_txt_qd(2:end), 'qdd', '正动力学速度多模型');
+%% 7.1) 质量矩阵数值健康度（full 参数模型）
+mass_stats = struct();
+mass_stats.cad = collect_mass_matrix_stats(dataset, 1:M_fd, pi_cad, limb, para_order);
+mass_stats.rec = collect_mass_matrix_stats(dataset, 1:M_fd, pi_rec, limb, para_order);
+if ~isempty(pi_phys)
+    mass_stats.phys = collect_mass_matrix_stats(dataset, 1:M_fd, pi_phys, limb, para_order);
+end
 
-plot_data = [qdd_ref, qdd_cad, qdd_min, qdd_rec];
-legend_txt = {'qdd_{ref}','FD(CAD)','FD(\beta)','FD(\pi_{rec})'};
-if ~isempty(pi_phys), plot_data = [plot_data, qdd_phys]; legend_txt{end+1} = 'FD(\pi_{phys})'; end %#ok<AGROW>
-if ~isempty(pi_fd), plot_data = [plot_data, qdd_fd]; legend_txt{end+1} = 'FD(\pi_{fd})'; end %#ok<AGROW>
-plot_compare_with_error_6dof(t_fd, qdd_ref, 'qdd_{ref}', ...
-    plot_data(:, 7:end), legend_txt(2:end), 'qdd', '正动力学多模型');
+function qd_out = integrate_qd_from_qdd(t_vec, qd0, qdd_in)
+Mloc = size(qdd_in, 1);
+nloc = size(qdd_in, 2);
+qd_out = zeros(Mloc, nloc);
+if Mloc <= 0, return; end
+qd_out(1,:) = qd0;
+if Mloc == 1, return; end
+dt_med = median(diff(t_vec));
+if dt_med <= 0 || isnan(dt_med), dt_med = 0.002; end
+for kk = 2:Mloc
+    dt_k = t_vec(kk) - t_vec(kk-1);
+    if dt_k <= 0 || isnan(dt_k), dt_k = dt_med; end
+    qd_out(kk,:) = qd_out(kk-1,:) + dt_k * qdd_in(kk-1,:);
+end
+end
+if ~isempty(pi_fd)
+    mass_stats.fd = collect_mass_matrix_stats(dataset, 1:M_fd, pi_fd, limb, para_order);
+end
+
+fprintf('\nM(q) 数值健康度（FD关键）:\n');
+fprintf('  CAD : minEig[min/med]=%.3e / %.3e, cond[max/med]=%.3e / %.3e, fail_rate=%.2f%%\n', ...
+    mass_stats.cad.min_eig_min, mass_stats.cad.min_eig_median, ...
+    mass_stats.cad.cond_max, mass_stats.cad.cond_median, 100*mass_stats.cad.fail_rate);
+fprintf('  REC : minEig[min/med]=%.3e / %.3e, cond[max/med]=%.3e / %.3e, fail_rate=%.2f%%\n', ...
+    mass_stats.rec.min_eig_min, mass_stats.rec.min_eig_median, ...
+    mass_stats.rec.cond_max, mass_stats.rec.cond_median, 100*mass_stats.rec.fail_rate);
+if isfield(mass_stats, 'phys')
+    fprintf('  PHYS: minEig[min/med]=%.3e / %.3e, cond[max/med]=%.3e / %.3e, fail_rate=%.2f%%\n', ...
+        mass_stats.phys.min_eig_min, mass_stats.phys.min_eig_median, ...
+        mass_stats.phys.cond_max, mass_stats.phys.cond_median, 100*mass_stats.phys.fail_rate);
+end
+if isfield(mass_stats, 'fd')
+    fprintf('  FD  : minEig[min/med]=%.3e / %.3e, cond[max/med]=%.3e / %.3e, fail_rate=%.2f%%\n', ...
+        mass_stats.fd.min_eig_min, mass_stats.fd.min_eig_median, ...
+        mass_stats.fd.cond_max, mass_stats.fd.cond_median, 100*mass_stats.fd.fail_rate);
+end
+
+if plot_fd_compare
+    plot_data_qd = [qd_ref, qd_cad];
+    legend_txt_qd = {'qd_{ref}','int(FD(CAD))'};
+    if ~isempty(pi_phys), plot_data_qd = [plot_data_qd, qd_phys]; legend_txt_qd{end+1} = 'int(FD(\pi_{phys}))'; end %#ok<AGROW>
+    if ~isempty(pi_fd), plot_data_qd = [plot_data_qd, qd_fd]; legend_txt_qd{end+1} = 'int(FD(\pi_{fd}))'; end %#ok<AGROW>
+    plot_compare_with_error_6dof(t_fd, qd_ref, 'qd_{ref}', ...
+        plot_data_qd(:, 7:end), legend_txt_qd(2:end), 'qdd', '正动力学速度多模型');
+
+    plot_data = [qdd_ref, qdd_cad];
+    legend_txt = {'qdd_{ref}','FD(CAD)'};
+    if ~isempty(pi_phys), plot_data = [plot_data, qdd_phys]; legend_txt{end+1} = 'FD(\pi_{phys})'; end %#ok<AGROW>
+    if ~isempty(pi_fd), plot_data = [plot_data, qdd_fd]; legend_txt{end+1} = 'FD(\pi_{fd})'; end %#ok<AGROW>
+    plot_compare_with_error_6dof(t_fd, qdd_ref, 'qdd_{ref}', ...
+        plot_data(:, 7:end), legend_txt(2:end), 'qdd', '正动力学多模型');
+end
 
 if save_excel
     id_rmse = struct();
@@ -465,6 +580,28 @@ if save_excel
     out_xlsx = fullfile(build_dir, 'full_dynamics_validation_summary.xlsx');
     export_validation_summary_excel(out_xlsx, id_rmse, fd_rmse, meta_tbl);
     fprintf('Excel汇总已保存到: %s\n', out_xlsx);
+
+    if export_id_plot_png_to_excel && plot_id_compare && isfield(id_figs, 'compare') && isfield(id_figs, 'error')
+        id_plot_compare_png = fullfile(build_dir, 'id_compare_plot.png');
+        id_plot_error_png = fullfile(build_dir, 'id_error_plot.png');
+        try
+            saveas(id_figs.compare, id_plot_compare_png);
+            saveas(id_figs.error, id_plot_error_png);
+            T_plot = table( ...
+                string(id_plot_compare_png), ...
+                string(id_plot_error_png), ...
+                'VariableNames', {'id_compare_png', 'id_error_png'});
+            writetable(T_plot, out_xlsx, 'Sheet', 'ID_PLOT_FILES');
+            fprintf('ID图路径已写入Excel工作表 ID_PLOT_FILES\n');
+        catch ME
+            fprintf('写入ID图到Excel失败：%s\n', ME.message);
+        end
+    end
+
+    % 附加保存 M(q) 数值指标（便于后续批量筛选）
+    out_mass_mat = fullfile(build_dir, 'full_dynamics_mass_matrix_stats.mat');
+    save(out_mass_mat, 'mass_stats', 'csv_file');
+    fprintf('质量矩阵指标已保存到: %s\n', out_mass_mat);
 end
 
 %% 8) 最终输出（兼容后续脚本）
@@ -484,3 +621,47 @@ fprintf('  步骤7 正动力学: %s\n', step7_mat);
 fprintf('  最终结果: %s\n', out_mat);
 fprintf('===== 全流程对比完成 =====\n');
 
+function stats = collect_mass_matrix_stats(dataset, idx_list, pi_vec, limb, para_order)
+% collect_mass_matrix_stats 统计 full 参数模型下 M(q) 的数值性质
+    idx_list = idx_list(:);
+    n_pts = numel(idx_list);
+    min_eigs = nan(n_pts, 1);
+    conds = nan(n_pts, 1);
+    n_fail = 0;
+    opts_fd = struct('solver', 'Msym', 'regularize_min_eig', 1e-8, 'cond_warn', 1e15);
+
+    for ii = 1:n_pts
+        k = idx_list(ii);
+        qk = dataset.q(k,:);
+        qdk = dataset.qd(k,:);
+        tauk = dataset.tau(k,:);
+        try
+            [qdd_k, d] = forward_dynamics_full(qk, qdk, tauk, pi_vec, limb, para_order, opts_fd);
+            if any(~isfinite(qdd_k(:))) || isempty(d) || ~isfield(d, 'min_eig_Msym') || ~isfield(d, 'condMsym')
+                n_fail = n_fail + 1;
+                continue;
+            end
+            min_eigs(ii) = d.min_eig_Msym;
+            conds(ii) = d.condMsym;
+        catch
+            n_fail = n_fail + 1;
+        end
+    end
+
+    valid = isfinite(min_eigs) & isfinite(conds);
+    if any(valid)
+        stats.min_eig_min = min(min_eigs(valid));
+        stats.min_eig_median = median(min_eigs(valid));
+        stats.cond_max = max(conds(valid));
+        stats.cond_median = median(conds(valid));
+    else
+        stats.min_eig_min = nan;
+        stats.min_eig_median = nan;
+        stats.cond_max = nan;
+        stats.cond_median = nan;
+    end
+    stats.n_points = n_pts;
+    stats.n_valid = sum(valid);
+    stats.n_fail = n_fail;
+    stats.fail_rate = n_fail / max(n_pts, 1);
+end
