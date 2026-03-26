@@ -45,11 +45,11 @@ prep_opts.t_end_s   = 4.1;
 
 % 轨迹导数估计方式（当前统一为 lowpass_diff）
 prep_opts.derivative_method = 'lowpass_diff';  % 仅对 q 做零相位低通，再中心差分得到 qd/qdd
-prep_opts.q_lowpass_fc_Hz = 25;      % q 低通截止频率(Hz)：越低滤波越强；越高保留动态越多（qdd 也更“抖”）
+prep_opts.q_lowpass_fc_Hz = 15;      % q 低通截止频率(Hz)：越低滤波越强；越高保留动态越多（qdd 也更“抖”）
 prep_opts.q_lowpass_order = 2;       % q 低通阶数：越高滚降越陡、可能更易振铃；建议先用 2，再试 3
 
 % tau 低通参数（零相位）
-prep_opts.tau_lowpass_fc_Hz = 25; % tau 截止频率(Hz)：越低越平滑但可能削弱真实力矩峰值；常从 10~25Hz 试
+prep_opts.tau_lowpass_fc_Hz = 15; % tau 截止频率(Hz)：越低越平滑但可能削弱真实力矩峰值；常从 10~25Hz 试
 prep_opts.tau_lowpass_order = 2;  % tau 低通阶数：2 通常最稳健；升高可更强抑噪但可能带来过冲/振铃
 
 % τ_id 的“补偿项”开关：

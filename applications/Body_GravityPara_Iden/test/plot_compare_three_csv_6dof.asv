@@ -1,0 +1,273 @@
+% plot_compare_three_csv_6dof  通用多文件对比（当前支持 2~3 个 CSV）
+%
+% 用法：直接运行本脚本，或在命令行中：
+%   run('applications/Body_GravityPara_Iden/test/plot_compare_three_csv_6dof.m')
+% 如需更换数据文件，修改下面的 file_list 和 name_list。
+%
+% 对比内容：
+%   1) q / qd / qdd / tau 对比：所有输入文件
+%   2) 误差：其余文件相对 file_list{1}（分别对 q/qd/qdd/tau）
+%   3) 可选：plot_desired_compare=true 时，额外绘制各 CSV 中「期望轨迹」
+%      （read_leg_joint_csv 的 cmd_leg_l；若存在 cmd_torque_leg_l 则再画期望力矩）
+%
+% 并在命令窗口输出误差统计：最大值、RMSE、MAE、均值、标准差。
+
+clc;
+close all;
+
+app_root = fullfile(fileparts(mfilename('fullpath')), '..');
+addpath(fullfile(app_root, 'principle'));
+addpath(app_root);
+ensure_body_gravity_para_iden_path();
+
+% % 待对比文件：可填 2 个或 3 个（后续也可继续扩展）
+% file_list = {
+%     fullfile(app_root, 'data', 'excitation', 'PD-M1-v0_multi_joint_20260305-195432_exctra_real.csv')
+%     fullfile(app_root, 'data', 'excitation', 'PD-M1-v0_multi_joint_20260305-195346_exctra_sim.csv')
+%     fullfile(app_root, 'data', 'excitation', 'excitation_trajectory_TLBO_E1_PD-M1-v0_multi_joint_20260324-083606.csv')
+% };
+% file_list = {
+%     fullfile(app_root, 'data', 'excitation', 'PD-M1-v0_multi_joint_20260305-195729_real_run.csv')
+%     fullfile(app_root, 'data', 'excitation', 'PD-M1-v0_multi_joint_20260305-195641_sim_run.csv')
+%     fullfile(app_root, 'data', 'excitation', '0-260116_run_softly_轻跑步_002_leg_500Hz_PD-M1-v0_multi_joint_20260324-134112.csv')
+% };
+file_list = {
+    fullfile(app_root, 'data', 'excitation', 'single_run', 'PD-M1-v0_multi_joint_20260325-140557_safe_real.csv')
+    fullfile(app_root, 'data', 'excitation', 'single_run', 'PD-M1-v0_multi_joint_20260325-140507_safe_sim.csv')
+    fullfile(app_root, 'data', 'excitation', '0-260116_run_softly_轻跑步_002_leg_500Hz_PD-M1-v0_multi_joint_20260324-134112.csv')
+};
+name_list = {'实际', 'CAD', '辨识'};
+
+% file_list = {
+%     fullfile(app_root, 'data', 'excitation', '0-260116_run_softly_轻跑步_002_leg_500Hz_PD-M1-v0_multi_joint_20260325-035526_stillleg_safe_PD-M1-v0_multi_joint_20260325-053633.csv')
+%     fullfile(app_root, 'data', 'excitation', '0-260116_run_softly_轻跑步_002_leg_500Hz_PD-M1-v0_multi_joint_20260325-035526_stillleg_zero_PD-M1-v0_multi_joint_20260325-053516.csv')
+%     fullfile(app_root, 'data', 'excitation', '0-260116_run_softly_轻跑步_002_leg_500Hz_PD-M1-v0_multi_joint_20260325-035526.csv')
+% };
+% name_list = {'右腿位于安全位', '右腿位于0位', '双腿运动'};%仿真
+% 
+% file_list = {
+%     fullfile(app_root, 'data', 'excitation', 'single_run', 'PD-M1-v0_multi_joint_20260325-140557_safe_real.csv')
+%     fullfile(app_root, 'data', 'excitation', 'single_run', 'PD-M1-v0_multi_joint_20260325-140736_0_real.csv')
+%     fullfile(app_root, 'data', 'excitation', 'PD-M1-v0_multi_joint_20260305-195729_real_run.csv')
+% };
+% name_list = {'右腿位于安全位', '右腿位于0位', '双腿运动'};%实际
+
+% 是否额外绘制「期望轨迹」多文件对比（cmd_leg_l；有列则再画 cmd_torque_leg_l）
+plot_desired_compare = true;
+
+% PNG 输出目录
+out_dir = fullfile(app_root, 'fig_png');
+if ~exist(out_dir, 'dir')
+    mkdir(out_dir);
+end
+
+compare_multi_csv_6dof(file_list, name_list, out_dir, plot_desired_compare);
+
+%% ===== 子函数 =====
+function compare_multi_csv_6dof(file_list, name_list, out_dir, plot_desired_compare)
+% compare_multi_csv_6dof 对比 2~3 个 CSV 的 q/qd/qdd/tau（左腿 6 关节）
+% plot_desired_compare：true 时额外输出 cmd（期望位置）及 cmd_torque（若存在）的多文件对比图
+if ~iscell(file_list) || numel(file_list) < 2 || numel(file_list) > 3
+    error('file_list 需要是包含 2 或 3 个文件路径的 cell。');
+end
+
+if nargin < 4 || isempty(plot_desired_compare)
+    plot_desired_compare = false;
+end
+
+if nargin < 2 || isempty(name_list)
+    name_list = cell(1, numel(file_list));
+    for i = 1:numel(file_list)
+        name_list{i} = sprintf('文件%d', i);
+    end
+end
+if numel(name_list) ~= numel(file_list)
+    error('name_list 数量需与 file_list 一致。');
+end
+
+if nargin < 3 || isempty(out_dir)
+    app_root_local = fullfile(fileparts(mfilename('fullpath')), '..');
+    out_dir = fullfile(app_root_local, 'fig_png');
+end
+if ~exist(out_dir, 'dir')
+    mkdir(out_dir);
+end
+
+n_files = numel(file_list);
+all_data = cell(n_files, 1);
+n_each = zeros(n_files, 1);
+for i = 1:n_files
+    all_data{i} = read_leg_joint_csv(file_list{i});
+    n_each(i) = size(all_data{i}.pos_leg_l, 1);
+end
+n = min(n_each);
+t = all_data{1}.time(1:n);
+
+q_all = cell(n_files, 1);
+qd_all = cell(n_files, 1);
+qdd_all = cell(n_files, 1);
+tau_all = cell(n_files, 1);
+for i = 1:n_files
+    q_all{i} = all_data{i}.pos_leg_l(1:n, :);
+    qd_all{i} = all_data{i}.vel_leg_l(1:n, :);
+    tau_all{i} = all_data{i}.torque_leg_l(1:n, :);
+    qdd_all{i} = get_qdd_left(all_data{i}, n);
+end
+
+plot_metric_compare(t, q_all, name_list, 'q', out_dir, sprintf('q_compare_%dfiles.png', n_files));
+plot_metric_compare(t, qd_all, name_list, 'qd', out_dir, sprintf('qd_compare_%dfiles.png', n_files));
+plot_metric_compare(t, qdd_all, name_list, 'qdd', out_dir, sprintf('qdd_compare_%dfiles.png', n_files));
+plot_metric_compare(t, tau_all, name_list, 'torque', out_dir, sprintf('tau_compare_%dfiles.png', n_files));
+
+if plot_desired_compare
+    cmd_q_all = cell(n_files, 1);
+    for i = 1:n_files
+        cmd_q_all{i} = all_data{i}.cmd_leg_l(1:n, :);
+    end
+    curve_q_cmd = struct();
+    curve_q_cmd.label_x = repmat({'time / s'}, 1, 6);
+    curve_q_cmd.label_y = repmat({'q_cmd / rad'}, 1, 6);
+    curve_q_cmd.label_title = '期望关节角 q_cmd（左腿）多文件对比';
+    plot_metric_compare_custom(t, cmd_q_all, name_list, curve_q_cmd, out_dir, sprintf('q_cmd_desired_compare_%dfiles.png', n_files));
+
+    has_cmd_tau = true;
+    for i = 1:n_files
+        if ~isfield(all_data{i}, 'cmd_torque_leg_l') || isempty(all_data{i}.cmd_torque_leg_l)
+            has_cmd_tau = false;
+            break;
+        end
+    end
+    if has_cmd_tau
+        cmd_tau_all = cell(n_files, 1);
+        for i = 1:n_files
+            cmd_tau_all{i} = all_data{i}.cmd_torque_leg_l(1:n, :);
+        end
+        curve_tau_cmd = struct();
+        curve_tau_cmd.label_x = repmat({'time / s'}, 1, 6);
+        curve_tau_cmd.label_y = repmat({'tau_cmd / N*m'}, 1, 6);
+        curve_tau_cmd.label_title = '期望关节力矩 tau_cmd（左腿）多文件对比';
+        plot_metric_compare_custom(t, cmd_tau_all, name_list, curve_tau_cmd, out_dir, sprintf('tau_cmd_desired_compare_%dfiles.png', n_files));
+    end
+end
+
+% 误差：其余文件相对第一个文件
+joint_labels = {'L1', 'L2', 'L3', 'L4', 'L5', 'L6'};
+fprintf('\n===== 多文件误差统计（基准：%s）=====\n', name_list{1});
+
+plot_and_print_err(t, q_all,   name_list, 'q',      'q / rad',        out_dir, sprintf('q_error_%dfiles_ref1.png', n_files), joint_labels);
+plot_and_print_err(t, qd_all,  name_list, 'qd',     'qd / (rad/s)',   out_dir, sprintf('qd_error_%dfiles_ref1.png', n_files), joint_labels);
+plot_and_print_err(t, qdd_all, name_list, 'qdd',    'qdd / (rad/s^2)',out_dir, sprintf('qdd_error_%dfiles_ref1.png', n_files), joint_labels);
+plot_and_print_err(t, tau_all, name_list, 'torque', 'tau / (N·m)',    out_dir, sprintf('tau_error_%dfiles_ref1.png', n_files), joint_labels);
+end
+
+function plot_metric_compare(t, data_cell, name_list, metric_key, out_dir, out_name)
+n_files = numel(data_cell);
+plot_mat = [];
+for i = 1:n_files
+    plot_mat = [plot_mat, data_cell{i}]; %#ok<AGROW>
+end
+f = figure('Name', sprintf('%s 多文件对比', metric_key));
+plot_compare_6dof(t, plot_mat, metric_key, name_list);
+print(f, fullfile(out_dir, out_name), '-dpng', '-r300');
+end
+
+function plot_metric_compare_custom(t, data_cell, name_list, curve_spec, out_dir, out_name)
+% curve_spec：struct，含 label_x(1×6 cell)、label_y(1×6 cell)、label_title（字符串），传给 plot_compare_6dof
+n_files = numel(data_cell);
+plot_mat = [];
+for i = 1:n_files
+    plot_mat = [plot_mat, data_cell{i}]; %#ok<AGROW>
+end
+f = figure('Name', curve_spec.label_title);
+plot_compare_6dof(t, plot_mat, curve_spec, name_list);
+print(f, fullfile(out_dir, out_name), '-dpng', '-r300');
+end
+
+function plot_and_print_err(t, data_cell, name_list, metric_key, unit_str, out_dir, out_name, joint_labels)
+n_files = numel(data_cell);
+err_legends = cell(1, n_files - 1);
+err_plot_mat = [];
+for i = 2:n_files
+    err_i = data_cell{i} - data_cell{1};
+    err_plot_mat = [err_plot_mat, err_i]; %#ok<AGROW>
+    err_legends{i-1} = sprintf('%s-%s', name_list{i}, name_list{1});
+    print_err_stats(compute_err_stats(err_i, joint_labels, unit_str), sprintf('%s: %s', err_legends{i-1}, metric_key));
+end
+f = figure('Name', sprintf('%s 误差 (相对%s)', metric_key, name_list{1}));
+plot_compare_6dof(t, err_plot_mat, metric_key, err_legends);
+print(f, fullfile(out_dir, out_name), '-dpng', '-r300');
+end
+
+function qdd_l = get_qdd_left(data, n)
+% 优先使用 CSV 自带 qdd；若无，则由 qd 数值微分得到
+if isfield(data, 'acc_leg_l') && ~isempty(data.acc_leg_l)
+    qdd_l = data.acc_leg_l(1:n, :);
+else
+    qd_l = data.vel_leg_l(1:n, :);
+    t = data.time(1:n);
+    qdd_l = diff_by_time(qd_l, t);
+end
+end
+
+function dx = diff_by_time(x, t)
+% 中心差分（首尾用单边差分）
+[N, D] = size(x);
+dx = zeros(N, D);
+if N <= 1
+    return;
+end
+for k = 2:N-1
+    dt = t(k+1) - t(k-1);
+    if abs(dt) < eps
+        dx(k, :) = 0;
+    else
+        dx(k, :) = (x(k+1, :) - x(k-1, :)) / dt;
+    end
+end
+dt1 = t(2) - t(1);
+if abs(dt1) < eps
+    dx(1, :) = 0;
+else
+    dx(1, :) = (x(2, :) - x(1, :)) / dt1;
+end
+dtN = t(N) - t(N-1);
+if abs(dtN) < eps
+    dx(N, :) = 0;
+else
+    dx(N, :) = (x(N, :) - x(N-1, :)) / dtN;
+end
+end
+
+function s = compute_err_stats(err, joint_labels, unit_str)
+% err n×6，每列一个关节
+n_j = size(err, 2);
+s.joint_labels = joint_labels;
+s.unit = unit_str;
+s.max_abs = zeros(1, n_j);
+s.rmse    = zeros(1, n_j);
+s.mae     = zeros(1, n_j);
+s.mean_e  = zeros(1, n_j);
+s.std_e   = zeros(1, n_j);
+for j = 1:n_j
+    e = err(:, j);
+    s.max_abs(j) = max(abs(e));
+    s.rmse(j)    = sqrt(mean(e.^2));
+    s.mae(j)     = mean(abs(e));
+    s.mean_e(j)  = mean(e);
+    s.std_e(j)   = std(e);
+end
+e_all = err(:);
+s.overall_max_abs = max(abs(e_all));
+s.overall_rmse   = sqrt(mean(e_all.^2));
+s.overall_mae    = mean(abs(e_all));
+end
+
+function print_err_stats(s, name)
+fprintf('\n--- %s (%s) ---\n', name, s.unit);
+fprintf('关节\t\tmax|e|\t\tRMSE\t\tMAE\t\tmean(e)\t\tstd(e)\n');
+for j = 1:length(s.joint_labels)
+    fprintf('%s\t\t%.6g\t\t%.6g\t\t%.6g\t\t%.6g\t\t%.6g\n', ...
+        s.joint_labels{j}, s.max_abs(j), s.rmse(j), s.mae(j), s.mean_e(j), s.std_e(j));
+end
+fprintf('整体\t\t%.6g\t\t%.6g\t\t%.6g\n', s.overall_max_abs, s.overall_rmse, s.overall_mae);
+end

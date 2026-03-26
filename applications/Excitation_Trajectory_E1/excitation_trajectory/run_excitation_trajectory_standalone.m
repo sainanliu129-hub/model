@@ -29,7 +29,7 @@ addpath(fullfile(repo_root, 'applications', 'Body_GravityPara_Iden'));
 ensure_body_gravity_para_iden_path();   % utility_function, dynamics, robot_model
 
 % 快速验证：true 时降低采样/周期/优化迭代，流程不变但更快跑通；正式生成改为 false
-FAST_VERIFY = true;
+FAST_VERIFY = false;
 
 % 配置：生成左腿激励轨迹，右腿关节位置恒为 0（输出为全身 12 关节：左 6 + 右 6 零）
 config = struct();
@@ -39,33 +39,37 @@ config.move_axis = [0, 1, 2, 3, 4, 5];
 config.init_joint = [0; 0; 0; 0; 0; 0];
 n_right = 6;   % 右腿关节数，输出时补零
 config.traj_cycle = 5;
-config.sample_frequency = 100;
+config.sample_frequency = 500;
 % 关节角范围：二选一，注释掉不用的
-config.upper_joint_bound = 2*pi * ones(6, 1);
-config.lower_joint_bound = -2*pi * ones(6, 1);
-% config.upper_joint_bound = [0.61;  0.436; 0.785; 2.44;  0.523; 0.262];
-% config.lower_joint_bound = [-0.61; -0.261; -2.09; 0;    -0.872; -0.262];
+% config.upper_joint_bound = 2*pi * ones(6, 1);
+% config.lower_joint_bound = -2*pi * ones(6, 1);
+config.upper_joint_bound = [0.61;  0.436; 0.785; 2.44;  0.523; 0.262];
+config.lower_joint_bound = [-0.61; -0.261; -2.09; 0;    -0.872; -0.262];
 config.max_velocity      = [16.75; 20.1;  20.1;  13.18; 12.46; 12.46];
 config.max_acceleration  = [200.0;   200.0;   200.0;   200.0;   200.0;   200.0];
 % 傅里叶阶数与周期：速度幅值 ∝ omega*系数，omega=2*pi/period。想提高速度峰值（如接近 max_velocity=20）可缩周期或升阶
 config.order = 6;
-config.period = 8;
+config.period = 2;
 % 速度偏小时可改用（二选一）：缩周期 period=6 或 8、或升阶 order=6，再配合下边系数界
 % config.order = 6;  config.period = 6;
 config.sample_number = 15;
 % 若校验常因扭矩或速度超限失败，可改为：config.order = 3; config.period = 12;
 % 幅值安全余量 alpha：sum(|a|+|b|)<=alpha*(upper-lower)/2，0.6~0.8
-config.amplitude_alpha = 0.7;
+% 先收紧幅值，避免贴边导致 valid_ok=false（你当前失败点正是关节2/6轻微越界）
+config.amplitude_alpha = 0.63;
 % 默认进行碰撞检测（优化与校验均做自碰撞检测）；不需要时设 config.enable_collision_check = false
 config.enable_collision_check = true;
-% 与 TLBO_E1 完全一致：使用 config 原始限位（不收紧为完整范围的 0.4/0.9 速度），校核也用同一套限位
-config.use_full_bounds_for_optim = true;
+% 为了提升通过率：优化阶段也按“设计半宽=0.4×完整范围”收紧，
+% 给最终校核（0.45×完整范围）留裕度；否则容易出现你日志里的 关节2/6 轻微贴边越界。
+config.use_full_bounds_for_optim = false;
 % 系数界：默认 ±0.5；想更大速度可放宽到 ±0.8 或 ±1（受 amplitude_alpha 幅值约束限制）
-% config.coeff_lower = -0.8;  config.coeff_upper = 0.8;
+% 当前仍在 2/6 关节轻微贴边，进一步收紧到 ±0.4 提升 valid_ok 通过率
+config.coeff_lower = -0.4;
+config.coeff_upper = 0.4;
 
 if FAST_VERIFY
     config.sample_frequency = 100;
-    config.traj_cycle = 1;
+    config.traj_cycle = 30;
 end
 
 % 可选：先 4 关节（L2,L3,L4,L5，索引 1,2,3,4），L1/L6 固定中位，可行域更大
@@ -92,6 +96,15 @@ if ~isfield(config, 'robot_limb') || ~isfield(config, 'max_effort')
     limb = 'left_leg';
     if isfield(config, 'cond_limb') && ~isempty(config.cond_limb)
         limb = config.cond_limb;
+    end
+    % export_limb 决定：CSV 输出里哪条腿是激励腿，另一条腿用安全位姿填充。
+    % 默认与 limb 一致（保证 refPos 与 build_* 的 limb 语义一致）。
+    if ~exist('export_limb', 'var') || isempty(export_limb)
+        export_limb = limb;
+    end
+    % 若为空，则使用默认安全位映射（与 plan/其它脚本一致）。
+    if ~exist('export_other_leg_safe_6', 'var')
+        export_other_leg_safe_6 = [];
     end
     try
         [config.robot_limb, n_limb] = get_e1_limb_robot(limb);
@@ -135,8 +148,10 @@ fprintf('===== 激励轨迹生成 =====\n');
 if FAST_VERIFY
     fprintf('【快速验证模式】采样 %d Hz、周期数 %d、优化迭代/评估上限已缩小\n', config.sample_frequency, config.traj_cycle);
 end
-% 重试次数：2 次以缩短总时间（原 5 次约半小时级）
-max_tries = 2;
+% 重试次数：作为补充，提高到 5
+max_tries = 5;
+valid_ok = false;                 % 防止在多次尝试全部失败时误用旧值
+violation_details = [];          % 占位：便于后续打印
 for try_i = 1:max_tries
     use_optim = true;   % 始终优化，否则随机系数很难满足约束
     if use_optim
@@ -190,6 +205,11 @@ for try_i = 1:max_tries
     end
 end
 
+% 校核全失败：不导出 CSV（避免后续流程误用“旧文件”造成混淆）
+if ~valid_ok
+    fprintf('\n[run_excitation_trajectory_standalone] 校核未通过（valid_ok=false），不生成 excitation_trajectory_standalone.csv。\n');
+end
+
 % 扩展为全身轨迹（用于绘图）：未运行的一腿恒 0；CSV 输出时改为「0位→过渡入→n周期→过渡出→0位」+ 另一腿安全位
 if n_right > 0
     if strcmp(limb, 'left_leg')
@@ -207,6 +227,35 @@ E1_ROLL_SAFE_LEFT_UPPER  = 0.436;
 TRANSITION_TIME = 1.5;   % 起止过渡段时长 (s)，增大可降低过渡段最大速度；配合 max_velocity_ramp 限速
 refVel_full = [refVel, zeros(size(refVel, 1), n_right)];
 refAcc_full = [refAcc, zeros(size(refAcc, 1), n_right)];
+
+% 为了让“完整轨迹”绘图与最终 CSV 一致：若是单腿（DOF=6），提前生成一份带安全位与过渡段的 Q12_plot
+has_q12_plot = false;
+t_full_plot = [];
+Q12_plot = [];
+if valid_ok && n_right == 6 && size(trajectory, 2) == 13
+    % 默认安全位映射（与 TLBO/plan 一致）
+    if isempty(export_other_leg_safe_6)
+        if strcmp(export_limb, 'left_leg')
+            other_leg_safe_6_plot = [0, E1_ROLL_SAFE_RIGHT_LOWER, 0, 0, 0, 0];
+        else
+            other_leg_safe_6_plot = [0, E1_ROLL_SAFE_LEFT_UPPER, 0, 0, 0, 0];
+        end
+    else
+        other_leg_safe_6_plot = export_other_leg_safe_6(:).';
+        if numel(other_leg_safe_6_plot) ~= 6
+            other_leg_safe_6_plot = [];
+        end
+    end
+
+    if ~isempty(other_leg_safe_6_plot) && exist('build_excitation_leg_trajectory_with_ramps', 'file') == 2
+        Ts_plot = 1 / config.sample_frequency;
+        t_one_plot = (0:size(refPos, 1)-1)' * Ts_plot;
+        max_vel_ramp_plot = config.max_velocity(1:min(6, numel(config.max_velocity)));
+        [t_full_plot, Q12_plot] = build_excitation_leg_trajectory_with_ramps( ...
+            t_one_plot, refPos, limb, config.traj_cycle, TRANSITION_TIME, Ts_plot, other_leg_safe_6_plot, refVel, refAcc, max_vel_ramp_plot);
+        has_q12_plot = true;
+    end
+end
 
 % 打印当前轨迹的限值参数与校核参数
 fprintf('\n----- 当前轨迹限值参数 -----\n');
@@ -266,17 +315,23 @@ for j = 1:size(refPos, 2)
 end
 
 % ---------- 图1：完整激励轨迹 - 全时间段 12 关节位置（含过渡段+周期重复+回零）----------
-t_full = trajectory(:, 1);
-n_joint_full = size(trajectory, 2) - 1;   % 12
+if has_q12_plot
+    t_full = t_full_plot;
+    traj_q_full = Q12_plot;   % N×12
+else
+    t_full = trajectory(:, 1);
+    traj_q_full = trajectory(:, 2:end);
+end
+n_joint_full = size(traj_q_full, 2);   % 12
 figure('Name', '激励轨迹 - 完整轨迹 12 关节位置', 'Position', [50, 50, 1200, 900]);
 for j = 1:n_joint_full
     subplot(3, 4, j);
-    plot(t_full, trajectory(:, j+1), 'b-'); grid on;
+    plot(t_full, traj_q_full(:, j), 'b-'); grid on;
     ylabel('q (rad)');
     if j <= 6
         title(sprintf('关节 %d（左腿）', j));
     else
-        title(sprintf('关节 %d（右腿，恒0）', j));
+        title(sprintf('关节 %d（右腿）', j));
     end
     if j > 8, xlabel('t (s)'); end
 end
@@ -309,10 +364,26 @@ end
 if valid_ok
     csv_name = fullfile(this_dir, 'excitation_trajectory_standalone.csv');
     if size(trajectory, 2) == 13
-        if strcmp(limb, 'left_leg')
-            other_leg_safe_6 = [0, E1_ROLL_SAFE_RIGHT_LOWER, 0, 0, 0, 0];
+        % 本脚本的 refPos 是按 limb 生成的；为避免左右语义错位，
+        % 要求 export_limb 与 limb 一致（DOF==6 情况写 CSV 时才使用安全位）。
+        if ~strcmp(export_limb, limb)
+            error('run_excitation_trajectory_standalone: export_limb(=%s) must equal limb(=%s) for DOF==6 CSV export.', export_limb, limb);
+        end
+
+        if isempty(export_other_leg_safe_6)
+            % 默认映射（与 TLBO/plan 一致）：
+            % export_limb='left_leg'  => other_leg roll = right_lower (-0.436)
+            % export_limb='right_leg' => other_leg roll = left_upper  (+0.436)
+            if strcmp(export_limb, 'left_leg')
+                other_leg_safe_6 = [0, E1_ROLL_SAFE_RIGHT_LOWER, 0, 0, 0, 0];
+            else
+                other_leg_safe_6 = [0, E1_ROLL_SAFE_LEFT_UPPER, 0, 0, 0, 0];
+            end
         else
-            other_leg_safe_6 = [0, E1_ROLL_SAFE_LEFT_UPPER, 0, 0, 0, 0];
+            other_leg_safe_6 = export_other_leg_safe_6(:).';
+            if numel(other_leg_safe_6) ~= 6
+                error('run_excitation_trajectory_standalone: export_other_leg_safe_6 must have 6 elements.');
+            end
         end
         Ts = 1 / config.sample_frequency;
         t_one = (0:size(refPos, 1)-1)' * Ts;

@@ -13,7 +13,7 @@
 clear; clc; close all;
 
 % 摩擦模型选择
-FrictionModel = 'tanh_viscous';   % 'coulomb_viscous' | 'tanh_viscous' | 'stribeck_viscous'
+FrictionModel = 'stribeck_viscous';   % 'coulomb_viscous' | 'tanh_viscous' | 'stribeck_viscous'
 
 % 确保 utility_function 与当前目录在路径
 cur = fileparts(mfilename('fullpath'));
@@ -52,7 +52,15 @@ end
 % K_tau = 4.1;
 % VarianceSpeedPct = 5;   % 匀速段判定：速度标准差≤速度的此百分比（可改，如 7、15）
 
-dd = get_data_dir('test_data/因克斯EC-A10020-P2-72V');
+% dd = get_data_dir('test_data/因克斯EC-A10020-P2-72V');
+% file_static   = fullfile(dd, 'scan_current_serial_20260310_164327.csv');    % 电流扫描（静摩擦）3
+% file_velocity = fullfile(dd, 'scan_result_20260310_170140.csv');      % 速度扫描（τ_c、b）
+% file_accel    = fullfile(dd, 'scan_accel_serial_mit_20260311_160046.csv');      % 加速度扫描（I_a）
+% file_accel_is_torque = false;   % true=该文件第二列为力矩；false=电流；不设或[]=按文件名自动判断（含 scan_torque_mit_over_rapoo 则为力矩）
+% K_tau = 2.6;
+% VarianceSpeedPct = 5;   % 匀速段判定：速度标准差≤速度的此百分比（可改，如 7、15）
+
+dd = get_data_dir('test_data/因克斯EC-A10020-P2-24');
 file_static   = fullfile(dd, 'scan_current_serial_20260310_164327.csv');    % 电流扫描（静摩擦）3
 file_velocity = fullfile(dd, 'scan_result_20260310_170140.csv');      % 速度扫描（τ_c、b）
 file_accel    = fullfile(dd, 'scan_accel_serial_mit_20260311_160046.csv');      % 加速度扫描（I_a）

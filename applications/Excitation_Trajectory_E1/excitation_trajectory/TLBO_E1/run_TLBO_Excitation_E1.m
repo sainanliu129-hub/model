@@ -25,7 +25,13 @@ if exist('ensure_body_gravity_para_iden_path', 'file')
 end
 
 % ---------- 与 run_excitation_trajectory_standalone.m 一致的配置 ----------
+% limb 决定了：优化/生成的是哪条肢体的激励轨迹（refPos_val 对应该肢体）
 limb = 'left_leg';   % 'left_leg' | 'right_leg' | 'left_arm' | 'right_arm'
+% export_limb 决定了：最终 CSV 里“哪条腿是激励腿，另一条腿用安全位姿”
+% 默认与 limb 一致（保证 refPos_val 与 build_* 的 limb 参数语义匹配）。
+export_limb = limb; % 可选：'left_leg' | 'right_leg'（建议不要与 limb 不一致）
+% 可选：如果你想自定义“另一条腿安全位”（6x1 或 1x6），填这里，否则留空使用默认映射
+export_other_leg_safe_6 = [];
 [robot_limb, DOF] = get_e1_limb_robot(limb);
 
 % 关节限位、速度、加速度：与 standalone 一致；若希望速度/加速度更大、进一步改善 cond(Y)，可设 true
@@ -87,8 +93,8 @@ if DOF >= 1, fprintf('峰值力矩 max_effort (N·m) = '); fprintf('%g ', max_ef
 
 % 周期与采样：动力学辨识建议 激励总时长 30–60 s、基频 0.2–2 Hz、max|qdd| > 20 rad/s²（理想 30–80）
 % period 单周期时长(s)；傅里叶 L=4 时频率为 1/period～4/period (Hz)。period=8 → 0.125～0.5 Hz
-period = 8.0;
-% period = 2;  % 短周期：基频高、单周期内 qdd 幅值易大，但总激励时间需靠 traj_cycle 拉长
+% period = 8.0;
+period = 1.0;  % 短周期：基频高、单周期内 qdd 幅值易大，但总激励时间需靠 traj_cycle 拉长
 sample_frequency = 500;
 Exciting_Time = period;
 Sampling_Time = 1 / sample_frequency;
@@ -113,7 +119,7 @@ penalty_scale = 10000;
 Enable_Collision_Check = true;
 % 输出轨迹的周期重复次数：优化与校核仍按单周期；CSV 与多周期绘图按此重复（与 standalone 的 traj_cycle 一致）
 % 激励总时长 ≈ period * traj_cycle（不含过渡段），建议 30–60 s → 例如 period=8, traj_cycle=6 得 48 s
-traj_cycle = 6;   % 6 周期 × 8 s = 48 s 激励；可改为 4～8 以落在 30–60 s
+traj_cycle = 5;   % 6 周期 × 8 s = 48 s 激励；可改为 4～8 以落在 30–60 s
 
 % ---------- 初始化种群：随机系数 + Tradeoff_Modify 保证在限位内 ----------
 Coefficient_ExTra_Current = -3 + 6*rand(Population, Num_Design_Variate);
@@ -316,12 +322,24 @@ if valid_ok
     csv_name = fullfile(this_dir, 'excitation_trajectory_TLBO_E1.csv');
     N_one = size(refPos_val, 1);
     if DOF == 6
-        is_left = strcmp(limb, 'left_leg');
-        if is_left
-            other_leg_safe_6 = [0, E1_ROLL_SAFE_RIGHT_LOWER, 0, 0, 0, 0];
-        else
-            other_leg_safe_6 = [0, E1_ROLL_SAFE_LEFT_UPPER, 0, 0, 0, 0];
+        % 本脚本的 refPos_val 是按 limb 生成的；为避免左右腿映射错位，要求 export_limb 与 limb 一致。
+        if ~strcmp(export_limb, limb)
+            error('run_TLBO_Excitation_E1: export_limb(=%s) must equal limb(=%s) for DOF==6 CSV export.', export_limb, limb);
         end
+
+        % 默认安全位映射（与 plan/TLBO standlone 保持一致）：
+        % export_limb='left_leg'  => other_leg roll = right_lower (-0.436)
+        % export_limb='right_leg' => other_leg roll = left_upper  (+0.436)
+        if isempty(export_other_leg_safe_6)
+            if strcmp(export_limb, 'left_leg')
+                other_leg_safe_6 = [0, E1_ROLL_SAFE_RIGHT_LOWER, 0, 0, 0, 0];
+            else
+                other_leg_safe_6 = [0, E1_ROLL_SAFE_LEFT_UPPER, 0, 0, 0, 0];
+            end
+        else
+            other_leg_safe_6 = export_other_leg_safe_6;
+        end
+
         [t_full, Q12] = build_excitation_leg_trajectory_with_ramps(t_sample(:), refPos_val, limb, traj_cycle, TRANSITION_TIME, Sampling_Time, other_leg_safe_6, refVel_val, refAcc_val, dq_max);
         write_leg_trajectory_csv_plan_format(csv_name, t_full, Q12);
         % 完整轨迹关节角/速度/加速度

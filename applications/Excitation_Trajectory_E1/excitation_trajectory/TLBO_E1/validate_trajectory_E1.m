@@ -1,4 +1,8 @@
 function [ok, msg, details] = validate_trajectory_E1(refPos, refVel, refAcc, upper_joint, lower_joint, max_vel, max_acc, robot_limb, max_effort, relax_pos, relax_vel, relax_acc, enable_collision_check)
+% NOTE:
+% 本函数仅用于对“给定轨迹”做约束校核（位置/速度/加速度/扭矩/可选自碰撞）。
+% 它不是轨迹生成器或优化器；不要用 `run_TLBO_Excitation_E1.m` 来替代该校核器。
+% TLBO脚本会把候选轨迹交给本函数做最终一致性检查（与 standalone 判据对齐）。
 % validate_trajectory_E1  与 run_excitation_trajectory_standalone 校核逻辑完全一致
 %
 % 位置/速度/加速度/扭矩校核（扭矩限值 0.9*max_effort），最多 400 点，位置容差 1e-4 rad。

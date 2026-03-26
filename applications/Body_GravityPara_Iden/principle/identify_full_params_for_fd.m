@@ -71,7 +71,7 @@ opts = set_default(opts, 'tau_joint_weight_manual', []);   % 1xn，basis='manual
 opts = set_default(opts, 'tau_weight_eps', 1e-6);
 opts = set_default(opts, 'qdd_fail_penalty', 1e6); % FD 失败/NaN 时的惩罚项（避免优化中断）
 opts = set_default(opts, 'traj_Ns', 4);
-opts = set_default(opts, 'traj_H', 20);
+opts = set_default(opts, 'traj_H', 1);
 opts = set_default(opts, 'traj_dt', 0.002);
 opts = set_default(opts, 'alpha_q', 1.0);
 opts = set_default(opts, 'alpha_qd', 0.3);

@@ -51,13 +51,29 @@ if isempty(Fs_full), Fs_full = 1 / dt_full; end
 q_s_full = zeros(N, n);
 q_fc = opts.q_lowpass_fc_Hz;
 q_ord = opts.q_lowpass_order;
-if q_fc > 0 && Fs_full > 2 * q_fc
-    [bq, aq] = butter(q_ord, q_fc / (Fs_full / 2));
-    for j = 1:n
-        q_s_full(:, j) = filtfilt(bq, aq, q(:, j));
+if isscalar(q_fc)
+    if q_fc > 0 && Fs_full > 2 * q_fc
+        [bq, aq] = butter(q_ord, q_fc / (Fs_full / 2));
+        for j = 1:n
+            q_s_full(:, j) = filtfilt(bq, aq, q(:, j));
+        end
+    else
+        q_s_full = q;
     end
 else
-    q_s_full = q;
+    q_fc_vec = q_fc(:).';
+    if numel(q_fc_vec) ~= n
+        error('preprocess_lowpass_id_data: q_lowpass_fc_Hz 为向量时，长度需等于关节数 n=%d；当前=%d。', n, numel(q_fc_vec));
+    end
+    for j = 1:n
+        fcj = q_fc_vec(j);
+        if fcj > 0 && Fs_full > 2 * fcj
+            [bq, aq] = butter(q_ord, fcj / (Fs_full / 2));
+            q_s_full(:, j) = filtfilt(bq, aq, q(:, j));
+        else
+            q_s_full(:, j) = q(:, j);
+        end
+    end
 end
 
 qd_s_full = zeros(N, n);
@@ -177,7 +193,7 @@ if opts.do_plot
         title(sprintf('qd%d', j)); grid on; hold off;
 
         subplot(4, nj, 2 * nj + ii);
-        qdd_raw_win = local_center_diff(qd_raw(idx, j), dt);
+        qdd_raw_win = local_center_diff(qd_raw(idx, j), dt_full);
         plot(t_out, qdd_raw_win, 'Color', [0.7 0.7 0.7]); hold on;
         plot(t_out, qdd_s(:, j), 'b');
         title(sprintf('qdd%d', j)); grid on; hold off;

@@ -36,6 +36,7 @@ if ~isfield(prep, 'do_plot'), prep.do_plot = false; end
 
 if ~isfield(prep, 'do_compensation'), prep.do_compensation = false; end
 if ~isfield(prep, 'load_friction_from_summary'), prep.load_friction_from_summary = false; end
+if ~isfield(prep, 'do_Jeq_compensation'), prep.do_Jeq_compensation = true; end
 if ~isfield(prep, 'n_joints'), prep.n_joints = 6; end
 if ~isfield(prep, 'row_for_joint'), prep.row_for_joint = []; end
 if ~isfield(prep, 'friction_iden_dir'), prep.friction_iden_dir = ''; end
@@ -88,9 +89,48 @@ if prep.do_compensation
         if ~isfield(prep, 'friction_params') || isempty(prep.friction_params)
             prep.friction_params = fp_loaded;
         end
-        if ~isfield(prep, 'J_eq') || isempty(prep.J_eq)
-            prep.J_eq = Ia_loaded;
+        if prep.do_Jeq_compensation
+            if ~isfield(prep, 'J_eq') || isempty(prep.J_eq)
+                prep.J_eq = Ia_loaded;
+            end
+        else
+            % 仅减摩擦：不把电机等效惯量 Ia_loaded 映射到 J_eq
+            prep.J_eq = [];
         end
+    end
+
+    % 补偿启用后的快速诊断输出：便于确认摩擦/转子惯量是否真的加载并作用在预期关节
+    try
+        fp = [];
+        if isfield(prep, 'friction_params'), fp = prep.friction_params; end
+        J_eq = [];
+        if isfield(prep, 'J_eq'), J_eq = prep.J_eq; end
+        if isempty(J_eq), J_eq = zeros(1, prep.n_joints); end
+        J_eq = J_eq(:).';
+        if numel(J_eq) < prep.n_joints, J_eq = [J_eq, zeros(1, prep.n_joints - numel(J_eq))]; end
+        J_eq = J_eq(1:prep.n_joints);
+
+        tau_s = [];
+        if ~isempty(fp) && isstruct(fp) && isfield(fp, 'tau_s')
+            tau_s = fp.tau_s;
+        end
+        if isempty(tau_s), tau_s = zeros(1, prep.n_joints); end
+        tau_s = tau_s(:).';
+        if numel(tau_s) < prep.n_joints, tau_s = [tau_s, zeros(1, prep.n_joints - numel(tau_s))]; end
+        tau_s = tau_s(1:prep.n_joints);
+
+        nz_fric = sum(abs(tau_s) > 0);
+        nz_Jeq  = sum(abs(J_eq) > 0);
+        if isfield(prep, 'row_for_joint') && ~isempty(prep.row_for_joint)
+            rfj = prep.row_for_joint;
+            rfj = rfj(:).';
+        else
+            rfj = [];
+        end
+        fprintf('[preprocess] do_compensation=1, row_for_joint=%s, nz_friction(tau_s)=%d/%d, nz_J_eq=%d/%d\n', ...
+            mat2str(rfj), nz_fric, prep.n_joints, nz_Jeq, prep.n_joints);
+    catch
+        % 若 diagnostics 失败，不影响主流程
     end
 else
     % 禁用补偿时，强制清空补偿项，确保只做滤波

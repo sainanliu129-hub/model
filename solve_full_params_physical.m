@@ -40,10 +40,26 @@ function [pi_phys, info] = solve_full_params_physical(Y_full, Y_min, beta_hat, p
 %   .h_dev_abs           默认 0.10   % |h-h_cad| <= h_dev_abs (kg*m)
 %
 %   % 加权正则
-%   .w_m                 默认 20
-%   .w_h                 默认 80
-%   .w_Idiag             默认 20
-%   .w_Ioff              默认 120
+%   .w_m                 默认 1
+%   .w_h                 默认 5
+%   .w_I                 默认 2      % 惯量整体（含对角+交叉）权重
+%
+%   % 可选：PHYS 阶段轻量质量矩阵健康度惩罚
+%   .lambda_M            默认 0      % 建议 1e-3 ~ 1e-2（相对拟合项）
+%   .eps_M               默认 1e-6
+%   .q_M                 默认 []     % N×n 采样关节角；为空则 J_M 关闭
+%   .idx_M               默认 []     % q_M 的子采样索引；空则全用
+%   .limb                默认 'left_leg'
+%   .para_order          默认 1
+%
+%   % 可选：H 步串联速度一致项 J_qd（抑制 qdd 尚可但 qd 漂移；H 见 qd_H_steps）
+%   .lambda_qd           默认 0
+%   .qd_H_steps          默认 1；H>1 时对 qd(k+H) 做 H 步递推预测并与测量比较
+%   .qd_err_joint_weights 可选 1×n 向量，对 ||e_j||^2 逐关节加权；空则看 qd_w_j56
+%   .qd_w_j56            默认 1；当未提供 qd_err_joint_weights 且 n>=6 时，关节 5/6 使用此权重（再整体归一化使 mean(w)=1）
+%   .t_sample            M×1 时间戳（与 q/qd/tau 行对齐）
+%   .q_sample, .qd_sample, .tau_sample  M×n 轨迹
+%   .idx_qd              采样下标 k（需满足 k+H<=M）；空则复用 idx_M 并自动去掉末 H 点
 %
 % 输出
 % -------------------------
@@ -76,14 +92,41 @@ function [pi_phys, info] = solve_full_params_physical(Y_full, Y_min, beta_hat, p
     opts = set_default(opts, 'eps_pd',           1e-4);
     opts = set_default(opts, 'offdiag_max_frac', 0.5);
 
-    opts = set_default(opts, 'diag_dev_frac',    0.8);
-    opts = set_default(opts, 'offdiag_dev_abs',  0.05);
-    opts = set_default(opts, 'h_dev_abs',        0.10);
+    opts = set_default(opts, 'diag_dev_frac',    0.8);   % 兼容旧参数（不再用于主要约束）
+    opts = set_default(opts, 'offdiag_dev_abs',  0.05);  % 兼容旧参数（不再用于主要约束）
+    opts = set_default(opts, 'h_dev_abs',        0.10);  % 兼容旧参数，等价于 h_box_abs
+    opts = set_default(opts, 'h_box_abs',        opts.h_dev_abs);
+    opts = set_default(opts, 'I_diag_lim_frac',  [0.5, 1.5]);
 
-    opts = set_default(opts, 'w_m',              20);
-    opts = set_default(opts, 'w_h',              80);
-    opts = set_default(opts, 'w_Idiag',          20);
-    opts = set_default(opts, 'w_Ioff',           120);
+    opts = set_default(opts, 'w_m',              1);
+    opts = set_default(opts, 'w_h',              5);
+    opts = set_default(opts, 'w_I',              []);
+    if isempty(opts.w_I)
+        if isfield(opts, 'w_Idiag') && ~isempty(opts.w_Idiag)
+            opts.w_I = opts.w_Idiag; % 向后兼容旧配置
+        else
+            opts.w_I = 2;
+        end
+    end
+
+    opts = set_default(opts, 'lambda_M',         0);
+    opts = set_default(opts, 'eps_M',            1e-6);
+    opts = set_default(opts, 'q_M',              []);
+    opts = set_default(opts, 'idx_M',            []);
+    opts = set_default(opts, 'limb',             'left_leg');
+    opts = set_default(opts, 'para_order',       1);
+
+    opts = set_default(opts, 'lambda_qd',        0);
+    opts = set_default(opts, 't_sample',         []);
+    opts = set_default(opts, 'q_sample',         []);
+    opts = set_default(opts, 'qd_sample',        []);
+    opts = set_default(opts, 'tau_sample',       []);
+    opts = set_default(opts, 'idx_qd',           []);
+    opts = set_default(opts, 'qd_H_steps',       1);
+    opts = set_default(opts, 'qd_w_j56',         1);
+    opts = set_default(opts, 'qd_err_joint_weights', []);
+    opts = set_default(opts, 'use_best_feasible', true);
+    opts = set_default(opts, 'early_stop_feas',   1e-4);
 
     % -------------------------
     % 输入整理
@@ -109,6 +152,9 @@ function [pi_phys, info] = solve_full_params_physical(Y_full, Y_min, beta_hat, p
 
     n_links = p / 10;
     tau_target = Y_min * beta_hat;
+
+    % forward_dynamics_full：与 collect_mass_matrix_stats 一致，优化过程少报警
+    opts_fd_phys = struct('solver', 'Msym', 'regularize_min_eig', 1e-8, 'cond_warn', 1e15);
 
     % -------------------------
     % 预计算 CAD 信息
@@ -158,7 +204,7 @@ function [pi_phys, info] = solve_full_params_physical(Y_full, Y_min, beta_hat, p
         e_fit = Y_full * pi_vec - tau_target;
         f_fit = e_fit.' * e_fit;
 
-        % 加权 CAD 正则
+        % 加权 CAD 正则（分块：m / h / I）
         f_reg = 0;
         for ii = 1:n_links
             id = blk_idx(ii);
@@ -167,17 +213,41 @@ function [pi_phys, info] = solve_full_params_physical(Y_full, Y_min, beta_hat, p
 
             d_m     = b(1)    - bc(1);
             d_h     = b(2:4)  - bc(2:4);
-            d_Idiag = [b(5)-bc(5); b(8)-bc(8); b(10)-bc(10)];
-            d_Ioff  = [b(6)-bc(6); b(7)-bc(7); b(9)-bc(9)];
+            d_I     = [b(5)-bc(5); b(6)-bc(6); b(7)-bc(7); ...
+                       b(8)-bc(8); b(9)-bc(9); b(10)-bc(10)];
 
             f_reg = f_reg ...
                 + opts.w_m     * (d_m.' * d_m) ...
                 + opts.w_h     * (d_h.' * d_h) ...
-                + opts.w_Idiag * (d_Idiag.' * d_Idiag) ...
-                + opts.w_Ioff  * (d_Ioff.' * d_Ioff);
+                + opts.w_I     * (d_I.' * d_I);
         end
 
-        f = f_fit + lambda * f_reg;
+        % 轻量 J_M：仅在提供 q_M 且 lambda_M>0 时启用
+        J_M = 0;
+        if opts.lambda_M > 0 && ~isempty(opts.q_M)
+            q_use = opts.q_M;
+            if ~isempty(opts.idx_M)
+                idx_m = opts.idx_M(:);
+                idx_m = idx_m(idx_m >= 1 & idx_m <= size(q_use, 1));
+                if ~isempty(idx_m)
+                    q_use = q_use(idx_m, :);
+                end
+            end
+            barrier_terms = zeros(size(q_use, 1), 1);
+            for kk = 1:size(q_use, 1)
+                min_eig_M = get_min_eig_M_from_pi(q_use(kk, :), pi_vec, opts.limb, opts.para_order);
+                barrier_terms(kk) = max(0, opts.eps_M - min_eig_M)^2;
+            end
+            J_M = mean(barrier_terms);
+        end
+
+        % H 步串联速度一致 J_qd（见 compute_J_qd_one_step）
+        J_qd = 0;
+        if opts.lambda_qd > 0
+            J_qd = compute_J_qd_one_step(pi_vec, opts, opts_fd_phys);
+        end
+
+        f = f_fit + lambda * f_reg + opts.lambda_M * J_M + opts.lambda_qd * J_qd;
     end
 
     % -------------------------
@@ -225,12 +295,12 @@ function [pi_phys, info] = solve_full_params_physical(Y_full, Y_min, beta_hat, p
                 dc(3) - opts.delta_c;
                -dc(3) - opts.delta_c];
 
-            % ---- 3) 一阶矩相对 CAD 不要漂太远 ----
+            % ---- 3) 一阶矩 h 显式 box ----
             dh = h_i - h_cad;
             c_h = [
-                dh(1) - opts.h_dev_abs; -dh(1) - opts.h_dev_abs;
-                dh(2) - opts.h_dev_abs; -dh(2) - opts.h_dev_abs;
-                dh(3) - opts.h_dev_abs; -dh(3) - opts.h_dev_abs];
+                dh(1) - opts.h_box_abs; -dh(1) - opts.h_box_abs;
+                dh(2) - opts.h_box_abs; -dh(2) - opts.h_box_abs;
+                dh(3) - opts.h_box_abs; -dh(3) - opts.h_box_abs];
 
             % ---- 4) 主惯量非负 + 三角不等式 ----
             c_diag_nonneg = [-Ixx; -Iyy; -Izz];
@@ -256,28 +326,38 @@ function [pi_phys, info] = solve_full_params_physical(Y_full, Y_min, beta_hat, p
                 abs(Ixz) - sxz;
                 abs(Iyz) - syz];
 
-            % ---- 7) 主惯量不要离 CAD 太远 ----
-            I_floor = 1e-4;
+            % ---- 7) 主惯量显式 box：Idiag ∈ [a,b] * Idiag_cad ----
+            % ---- 7.1) 交叉惯量偏差 box（补回：避免交叉项过度改变 M(q) 健康度）----
+            dx_off_lim = opts.offdiag_dev_abs;
+            c_offdiag_dev = [
+                (Ixy - cad(ii).Ixy) - dx_off_lim;
+               -(Ixy - cad(ii).Ixy) - dx_off_lim;
+                (Ixz - cad(ii).Ixz) - dx_off_lim;
+               -(Ixz - cad(ii).Ixz) - dx_off_lim;
+                (Iyz - cad(ii).Iyz) - dx_off_lim;
+               -(Iyz - cad(ii).Iyz) - dx_off_lim];
+
+            % ---- 7.2) 主惯量相对 CAD 偏差 box（补回：与 Idiag box 叠加，更稳）----
+            I_floor = 1e-6;
             dx_lim = opts.diag_dev_frac * max(abs(cad(ii).Ixx), I_floor);
             dy_lim = opts.diag_dev_frac * max(abs(cad(ii).Iyy), I_floor);
             dz_lim = opts.diag_dev_frac * max(abs(cad(ii).Izz), I_floor);
-
             c_diag_dev = [
-                (Ixx - cad(ii).Ixx) - dx_lim;
-               -(Ixx - cad(ii).Ixx) - dx_lim;
-                (Iyy - cad(ii).Iyy) - dy_lim;
-               -(Iyy - cad(ii).Iyy) - dy_lim;
-                (Izz - cad(ii).Izz) - dz_lim;
-               -(Izz - cad(ii).Izz) - dz_lim];
+                (Ixx - cad(ii).Ixx) - dx_lim;  -(Ixx - cad(ii).Ixx) - dx_lim;
+                (Iyy - cad(ii).Iyy) - dy_lim;  -(Iyy - cad(ii).Iyy) - dy_lim;
+                (Izz - cad(ii).Izz) - dz_lim;  -(Izz - cad(ii).Izz) - dz_lim];
 
-            % ---- 8) 交叉惯量相对 CAD 不要乱飞 ----
-            c_offdiag_dev = [
-                (Ixy - cad(ii).Ixy) - opts.offdiag_dev_abs;
-               -(Ixy - cad(ii).Ixy) - opts.offdiag_dev_abs;
-                (Ixz - cad(ii).Ixz) - opts.offdiag_dev_abs;
-               -(Ixz - cad(ii).Ixz) - opts.offdiag_dev_abs;
-                (Iyz - cad(ii).Iyz) - opts.offdiag_dev_abs;
-               -(Iyz - cad(ii).Iyz) - opts.offdiag_dev_abs];
+            % ---- 7.3) Idiag 显式 box：Idiag ∈ [a,b] * Idiag_cad ----
+            I_floor = 1e-6;
+            aI = opts.I_diag_lim_frac(1);
+            bI = opts.I_diag_lim_frac(2);
+            Ixx_ref = max(abs(cad(ii).Ixx), I_floor);
+            Iyy_ref = max(abs(cad(ii).Iyy), I_floor);
+            Izz_ref = max(abs(cad(ii).Izz), I_floor);
+            c_Idiag_box = [
+                aI * Ixx_ref - Ixx; Ixx - bI * Ixx_ref;
+                aI * Iyy_ref - Iyy; Iyy - bI * Iyy_ref;
+                aI * Izz_ref - Izz; Izz - bI * Izz_ref];
 
             c_all = [c_all;
                 c_mass_lb; c_mass_ub;
@@ -287,8 +367,9 @@ function [pi_phys, info] = solve_full_params_physical(Y_full, Y_min, beta_hat, p
                 c_tri;
                 c_pd;
                 c_offdiag;
+                c_offdiag_dev;
                 c_diag_dev;
-                c_offdiag_dev];
+                c_Idiag_box];
         end
 
         c = c_all;
@@ -302,6 +383,38 @@ function [pi_phys, info] = solve_full_params_physical(Y_full, Y_min, beta_hat, p
         error('solve_full_params_physical 需要 Optimization Toolbox 的 fmincon。');
     end
 
+    % 记录历史最优可行解（避免末次迭代反弹导致返回次优点）
+    best_x = [];
+    best_feas = inf;
+    best_fval = inf;
+    best_iter = 0;
+
+    function stop = outfun_track_best(x, optimValues, state) %#ok<INUSD>
+        stop = false;
+        if ~strcmp(state, 'iter')
+            return;
+        end
+        if isfield(optimValues, 'constrviolation')
+            feas = optimValues.constrviolation;
+        else
+            feas = inf;
+        end
+        fv = optimValues.fval;
+        % 主准则：可行性更好；次准则：在足够可行时选更小目标值
+        if (feas < best_feas) || (feas <= 1e-3 && fv < best_fval)
+            best_feas = feas;
+            best_fval = fv;
+            best_x = x(:);
+            if isfield(optimValues, 'iteration')
+                best_iter = optimValues.iteration;
+            end
+        end
+        % 可选：达到可行阈值后提前停止
+        if ~isempty(opts.early_stop_feas) && isfinite(opts.early_stop_feas) && feas <= opts.early_stop_feas
+            stop = true;
+        end
+    end
+
     options = optimoptions('fmincon', ...
         'Algorithm', opts.algorithm, ...
         'Display', opts.display, ...
@@ -309,12 +422,22 @@ function [pi_phys, info] = solve_full_params_physical(Y_full, Y_min, beta_hat, p
         'MaxFunctionEvaluations', opts.MaxFunctionEvaluations, ...
         'SpecifyObjectiveGradient', false, ...
         'SpecifyConstraintGradient', false, ...
+        'OutputFcn', @outfun_track_best, ...
         'StepTolerance', 1e-10, ...
         'ConstraintTolerance', 1e-8, ...
         'OptimalityTolerance', 1e-8);
 
-    [pi_phys, fval, exitflag, output] = fmincon( ...
+    [pi_last, fval_last, exitflag, output] = fmincon( ...
         @obj_fun, pi0, [], [], [], [], [], [], @nonlcon, options);
+
+    % 默认返回历史最优可行点；若未记录到则回退末次点
+    if opts.use_best_feasible && ~isempty(best_x)
+        pi_phys = best_x;
+        fval = obj_fun(pi_phys);
+    else
+        pi_phys = pi_last;
+        fval = fval_last;
+    end
 
     % -------------------------
     % 输出信息
@@ -325,10 +448,44 @@ function [pi_phys, info] = solve_full_params_physical(Y_full, Y_min, beta_hat, p
     info.output = output;
     info.lambda = lambda;
     info.opts = opts;
+    info.best_feas = best_feas;
+    info.best_fval = best_fval;
+    info.best_iter = best_iter;
+    info.used_best_feasible = opts.use_best_feasible && ~isempty(best_x);
+    info.pi_last = pi_last;
+    info.fval_last = fval_last;
 
     % 额外诊断
     info.fit_res_norm = norm(Y_full*pi_phys - tau_target);
     info.reg_res_norm = norm(pi_phys - pi_cad);
+    info.J_fit = info.fit_res_norm^2;
+    info.J_cad = compute_block_weighted_cad_cost(pi_phys, pi_cad, n_links, opts);
+    info.J_M = 0;
+    if opts.lambda_M > 0 && ~isempty(opts.q_M)
+        q_use = opts.q_M;
+        if ~isempty(opts.idx_M)
+            idx_m = opts.idx_M(:);
+            idx_m = idx_m(idx_m >= 1 & idx_m <= size(q_use, 1));
+            if ~isempty(idx_m)
+                q_use = q_use(idx_m, :);
+            end
+        end
+        barrier_terms = zeros(size(q_use, 1), 1);
+        for kk = 1:size(q_use, 1)
+            min_eig_M = get_min_eig_M_from_pi(q_use(kk, :), pi_phys, opts.limb, opts.para_order);
+            barrier_terms(kk) = max(0, opts.eps_M - min_eig_M)^2;
+        end
+        info.J_M = mean(barrier_terms);
+    end
+
+    info.J_qd = 0;
+    info.qd_err_joint_weights_used = [];
+    if opts.lambda_qd > 0
+        info.J_qd = compute_J_qd_one_step(pi_phys, opts, opts_fd_phys);
+        if isfield(opts, 'qd_sample') && ~isempty(opts.qd_sample)
+            info.qd_err_joint_weights_used = get_qd_err_joint_weights_vec(opts, size(opts.qd_sample, 2));
+        end
+    end
 
     info.per_link = struct([]);
     for ii = 1:n_links
@@ -372,4 +529,131 @@ function s = set_default(s, name, val)
     if ~isfield(s, name)
         s.(name) = val;
     end
+end
+
+function w = get_qd_err_joint_weights_vec(opts, n_j)
+% 返回 1×n_j 的逐关节权重（已归一化 mean(w)=1），用于 J_qd 中 sum_j w_j * e_j^2
+    w = ones(1, n_j);
+    if isfield(opts, 'qd_err_joint_weights') && ~isempty(opts.qd_err_joint_weights)
+        w = opts.qd_err_joint_weights(:).';
+        if numel(w) ~= n_j
+            error('solve_full_params_physical: qd_err_joint_weights 长度=%d，与关节维 n=%d 不一致。', numel(w), n_j);
+        end
+    elseif isfield(opts, 'qd_w_j56') && ~isempty(opts.qd_w_j56) && opts.qd_w_j56 > 0 && n_j >= 6
+        w(5:6) = opts.qd_w_j56;
+    end
+    wm = mean(w);
+    if wm > 0
+        w = w / wm;
+    end
+end
+
+function J_qd = compute_J_qd_one_step(pi_vec, opts, opts_fd)
+% H 步串联：qd_pred(k+H)=qd(k)+sum_{j=0}^{H-1} dt*qdd_fd(k+j)
+% 与测量 qd(k+H) 的加权平方误差均值；H 由 opts.qd_H_steps 控制（默认 1）
+    J_qd = 0;
+    if ~isfield(opts, 'lambda_qd') || opts.lambda_qd <= 0
+        return;
+    end
+    if ~isfield(opts, 'q_sample') || isempty(opts.q_sample)
+        return;
+    end
+    q_s = opts.q_sample;
+    if ~isfield(opts, 'qd_sample') || isempty(opts.qd_sample) || ...
+            ~isfield(opts, 'tau_sample') || isempty(opts.tau_sample) || ...
+            ~isfield(opts, 't_sample') || isempty(opts.t_sample)
+        return;
+    end
+    qd_s = opts.qd_sample;
+    tau_s = opts.tau_sample;
+    t_s = opts.t_sample(:);
+    Mnv = size(q_s, 1);
+    n_j = size(qd_s, 2);
+    w_j = get_qd_err_joint_weights_vec(opts, n_j);
+    if size(qd_s, 1) ~= Mnv || size(tau_s, 1) ~= Mnv || numel(t_s) ~= Mnv
+        return;
+    end
+    idxk = [];
+    if isfield(opts, 'idx_qd') && ~isempty(opts.idx_qd)
+        idxk = opts.idx_qd(:);
+    elseif isfield(opts, 'idx_M') && ~isempty(opts.idx_M)
+        idxk = opts.idx_M(:);
+    end
+    H = 1;
+    if isfield(opts, 'qd_H_steps') && ~isempty(opts.qd_H_steps) && isfinite(opts.qd_H_steps)
+        H = max(1, round(opts.qd_H_steps));
+    end
+    idxk = idxk(idxk >= 1 & idxk <= Mnv - H);
+    if isempty(idxk)
+        return;
+    end
+    acc = 0;
+    Ns = numel(idxk);
+    dt_med = median(diff(t_s));
+    if ~isfinite(dt_med) || dt_med <= 0
+        dt_med = 0.002;
+    end
+    for ii = 1:Ns
+        k = idxk(ii);
+        pred = qd_s(k, :);
+        ok = true;
+        for jj = 0:(H - 1)
+            kk = k + jj;
+            dt_k = t_s(kk + 1) - t_s(kk);
+            if ~isfinite(dt_k) || dt_k <= 0
+                dt_k = dt_med;
+            end
+            try
+                qdd_fd = forward_dynamics_full(q_s(kk, :), qd_s(kk, :), tau_s(kk, :), pi_vec, ...
+                    opts.limb, opts.para_order, opts_fd);
+                qdd_fd = qdd_fd(:).';
+            catch
+                qdd_fd = nan(1, n_j);
+            end
+            if any(~isfinite(qdd_fd))
+                ok = false;
+                break;
+            end
+            pred = pred + dt_k * qdd_fd;
+        end
+        if ~ok
+            acc = acc + 1e6;
+        else
+            e = qd_s(k + H, :) - pred;
+            acc = acc + sum(w_j .* (e.^2));
+        end
+    end
+    J_qd = acc / Ns;
+end
+
+function J_cad = compute_block_weighted_cad_cost(pi_vec, pi_cad, n_links, opts)
+    d = pi_vec(:) - pi_cad(:);
+    J_cad = 0;
+    for i = 1:n_links
+        i10 = (i-1)*10;
+        d_m = d(i10+1);
+        d_h = d(i10+2:i10+4);
+        d_I = d(i10+5:i10+10);
+        J_cad = J_cad ...
+            + opts.w_m * (d_m.' * d_m) ...
+            + opts.w_h * (d_h.' * d_h) ...
+            + opts.w_I * (d_I.' * d_I);
+    end
+end
+
+function min_eig_M = get_min_eig_M_from_pi(q_row, pi_vec, limb, para_order)
+    n = numel(q_row);
+    q_row = q_row(:).';
+    qd_zero = zeros(1, n);
+    qdd_zero = zeros(1, n);
+    pi_vec = pi_vec(:);
+    ID = @(q, qd, qdd) ReMatrix_E1_limb_URDF(limb, q, qd, qdd, 1, para_order) * pi_vec;
+    tau_g = ID(q_row, qd_zero, qdd_zero);
+    M = zeros(n, n);
+    for j = 1:n
+        e_j = zeros(1, n); e_j(j) = 1;
+        M(:, j) = ID(q_row, qd_zero, e_j) - tau_g;
+    end
+    Msym = 0.5 * (M + M.');
+    min_eig_M = min(real(eig(Msym)));
 end

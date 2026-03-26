@@ -113,22 +113,27 @@ if use_vel_acc && n_blend >= 4 && N_one > 2*n_blend + 2
         N_exc = (n_blend+1) + (N_one - 2*n_blend - 2) + (n_blend+1);   % = N_one
         refPos_multi = [blend_in; refPos_one(n_blend+2 : end-n_blend-1, :); blend_out];
     else
-        N_mid = (n_cycles - 1) * N_one;
-        N_exc = (n_blend+1) + (N_one - n_blend - 1) + N_mid + (N_one - n_blend - 1) + (n_blend+1);
-        refPos_multi = zeros(N_exc, 6);
-        refPos_multi(1:n_blend+1, :) = blend_in;
-        refPos_multi(n_blend+2 : n_blend+1 + (N_one - n_blend - 1), :) = refPos_one(n_blend+2:end, :);
-        idx = n_blend+1 + (N_one - n_blend - 1) + 1;
-        for c = 1:n_cycles-2
-            refPos_multi(idx:idx+N_one-1, :) = refPos_one;
-            idx = idx + N_one;
+        % 多周期拼接时，refPos_one 含端点(0 和 period)。端点在相邻周期拼接时在“物理时间上重合”，
+        % 如果重复端点再按 Ts 递增时间索引，diff 计算的 qd/qdd 会出现巨大尖峰。
+        % 修复：拼接后续周期时跳过 refPos_one 的第一个样本（即 refPos_one(1,:)）。
+        refPos_multi = [blend_in; refPos_one(n_blend+2:end, :)];
+
+        % 中间周期（2..n_cycles-1）：跳过每个周期起点采样
+        for c = 2:(n_cycles-1)
+            refPos_multi = [refPos_multi; refPos_one(2:end, :)]; %#ok<AGROW>
         end
-        refPos_multi(idx:idx+N_one-n_blend-2, :) = refPos_one(1:end-n_blend-1, :);
-        idx = idx + N_one - n_blend - 1;
-        refPos_multi(idx:idx+n_blend, :) = blend_out;
+
+        % 最后周期：同样跳过起点采样，再接 blend_out
+        refPos_multi = [refPos_multi; refPos_one(2:end-n_blend-1, :); blend_out];
+        N_exc = size(refPos_multi, 1);
     end
 else
-    refPos_multi = repmat(refPos_one, n_cycles, 1);
+    % 无 blend 时也进行“端点去重”拼接，避免 diff-based qd/qdd 尖峰。
+    if n_cycles <= 1
+        refPos_multi = refPos_one;
+    else
+        refPos_multi = [refPos_one; repmat(refPos_one(2:end, :), n_cycles-1, 1)];
+    end
     N_exc = size(refPos_multi, 1);
 end
 

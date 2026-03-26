@@ -243,6 +243,7 @@ end
 
 function opts = default_opts_fd_quick()
     opts = struct();
+    opts.traj_H = 1; % J_traj 短窗步数（w_traj>0 时生效；默认与单步速度/轨迹一致）
     opts.w_tau = 1;
     opts.w_qdd = 10;
     opts.w_cad = 1;

@@ -18,6 +18,10 @@ limb = 'left_leg';
 para_order = 1;
 do_plot = true;
 M_fd_max = inf;
+% FD 速度 qd 的对比/积分步数：
+%   inf  : 全程积分（使用预测的上一时刻 qd）
+%   H>=1 : H 步串联（起点使用实测 qd_ref(k-H)，与 run_full_dynamics_validation 的 H=配置一致）
+fd_qd_compare_steps = 1;
 % 仅依赖 step4/step5；step2/step3 的配置复用默认关闭
 reuse_step2_prep = false;
 reuse_step3_window = false;
@@ -85,8 +89,10 @@ prep_opts = struct( ...
     'q_lowpass_order', 2, ...
     'tau_lowpass_fc_Hz', 25, ...
     'tau_lowpass_order', 2, ...
-    'do_compensation', false, ...
-    'do_plot', false);
+    'do_compensation', true, ...
+    'load_friction_from_summary', true, ...
+    'row_for_joint', [0 0 0 0 5 5], ...
+    'do_plot', true);
 if reuse_step2_prep && isfile(step2_mat)
     S2 = load(step2_mat);
     if isfield(S2, 'prep_used') && ~isempty(S2.prep_used)
@@ -178,19 +184,86 @@ for k = 1:M_fd
     if ~isempty(pi_fd), qdd_fd(k,:) = forward_dynamics_dispatch(qk, qdk, tauk, model_fd_fd, struct()).'; end
 end
 
-qd_cad = zeros(M_fd, n); qd_cad(1,:) = qd_ref(1,:);
-qd_min = zeros(M_fd, n); qd_min(1,:) = qd_ref(1,:);
-qd_rec = zeros(M_fd, n); qd_rec(1,:) = qd_ref(1,:);
-qd_phys = zeros(M_fd, n); qd_phys(1,:) = qd_ref(1,:);
-qd_fd = zeros(M_fd, n); qd_fd(1,:) = qd_ref(1,:);
-for k = 2:M_fd
-    dt_k = t_fd(k) - t_fd(k-1);
-    if dt_k <= 0 || isnan(dt_k), dt_k = median(diff(t_fd)); end
-    qd_cad(k,:) = qd_cad(k-1,:) + dt_k * qdd_cad(k-1,:);
-    qd_min(k,:) = qd_min(k-1,:) + dt_k * qdd_min(k-1,:);
-    if ~isempty(pi_rec), qd_rec(k,:) = qd_rec(k-1,:) + dt_k * qdd_rec(k-1,:); end
-    if ~isempty(pi_phys), qd_phys(k,:) = qd_phys(k-1,:) + dt_k * qdd_phys(k-1,:); end
-    if ~isempty(pi_fd), qd_fd(k,:) = qd_fd(k-1,:) + dt_k * qdd_fd(k-1,:); end
+% qd 显示/对比：全程积分 vs H 步串联
+if isscalar(fd_qd_compare_steps) && isnumeric(fd_qd_compare_steps) && isfinite(fd_qd_compare_steps) && fd_qd_compare_steps >= 1
+    use_qd_integral_display = false;
+else
+    use_qd_integral_display = true;
+end
+
+qd_cad  = zeros(M_fd, n);
+qd_min  = zeros(M_fd, n);
+qd_rec  = zeros(M_fd, n);
+qd_phys = zeros(M_fd, n);
+qd_fd   = zeros(M_fd, n);
+
+if use_qd_integral_display
+    % 全程积分：q(k)=q(k-1)+dt*qdd(k-1)
+    qd_cad(1,:) = qd_ref(1,:);
+    qd_min(1,:) = qd_ref(1,:);
+    qd_rec(1,:) = qd_ref(1,:);
+    qd_phys(1,:) = qd_ref(1,:);
+    qd_fd(1,:) = qd_ref(1,:);
+    for k = 2:M_fd
+        dt_k = t_fd(k) - t_fd(k-1);
+        if dt_k <= 0 || isnan(dt_k), dt_k = median(diff(t_fd)); end
+        qd_cad(k,:) = qd_cad(k-1,:) + dt_k * qdd_cad(k-1,:);
+        qd_min(k,:) = qd_min(k-1,:) + dt_k * qdd_min(k-1,:);
+        if ~isempty(pi_rec),  qd_rec(k,:)  = qd_rec(k-1,:)  + dt_k * qdd_rec(k-1,:);  end
+        if ~isempty(pi_phys), qd_phys(k,:) = qd_phys(k-1,:) + dt_k * qdd_phys(k-1,:); end
+        if ~isempty(pi_fd),   qd_fd(k,:)   = qd_fd(k-1,:)   + dt_k * qdd_fd(k-1,:);   end
+    end
+else
+    % H 步串联：qd_pred(k)=qd_ref(k-H)+sum_{j=0..H-1} dt(s+j)*qdd_model(s+j), s=k-H
+    H_eff = min(round(fd_qd_compare_steps), max(M_fd - 1, 1));
+    dt_med = median(diff(t_fd));
+    if dt_med <= 0 || isnan(dt_med), dt_med = 0.002; end
+
+    qd_cad(1:H_eff,:)  = qd_ref(1:H_eff,:);
+    qd_min(1:H_eff,:)  = qd_ref(1:H_eff,:);
+    qd_rec(1:H_eff,:)  = qd_ref(1:H_eff,:);
+    qd_phys(1:H_eff,:) = qd_ref(1:H_eff,:);
+    qd_fd(1:H_eff,:)   = qd_ref(1:H_eff,:);
+
+    for k = (H_eff + 1):M_fd
+        s = k - H_eff;
+        qv_cad  = qd_ref(s,:);
+        qv_min  = qd_ref(s,:);
+        qv_rec  = qd_ref(s,:);
+        qv_phys = qd_ref(s,:);
+        qv_fd   = qd_ref(s,:);
+        for j = 0:(H_eff - 1)
+            dt_k = t_fd(s + j + 1) - t_fd(s + j);
+            if ~isfinite(dt_k) || dt_k <= 0, dt_k = dt_med; end
+            qv_cad = qv_cad + dt_k * qdd_cad(s + j,:);
+            qv_min = qv_min + dt_k * qdd_min(s + j,:);
+            if ~isempty(pi_rec),  qv_rec  = qv_rec  + dt_k * qdd_rec(s + j,:);  end
+            if ~isempty(pi_phys), qv_phys = qv_phys + dt_k * qdd_phys(s + j,:); end
+            if ~isempty(pi_fd),   qv_fd   = qv_fd   + dt_k * qdd_fd(s + j,:);   end
+        end
+        qd_cad(k,:) = qv_cad;
+        qd_min(k,:) = qv_min;
+        if ~isempty(pi_rec),  qd_rec(k,:)  = qv_rec;  end
+        if ~isempty(pi_phys), qd_phys(k,:) = qv_phys; end
+        if ~isempty(pi_fd),   qd_fd(k,:)   = qv_fd;   end
+    end
+end
+
+% 用 qd 积分得到 q，用于关节角对比
+q_ref_fd = dataset.q(1:M_fd, :);
+q0_fd = q_ref_fd(1, :);
+q_cad = integrate_q_from_qd_local(t_fd, q0_fd, qd_cad, q_ref_fd);
+q_min = integrate_q_from_qd_local(t_fd, q0_fd, qd_min, q_ref_fd);
+q_rec = integrate_q_from_qd_local(t_fd, q0_fd, qd_rec, q_ref_fd);
+if ~isempty(pi_phys)
+    q_phys = integrate_q_from_qd_local(t_fd, q0_fd, qd_phys, q_ref_fd);
+else
+    q_phys = zeros(M_fd, n);
+end
+if ~isempty(pi_fd)
+    q_fd = integrate_q_from_qd_local(t_fd, q0_fd, qd_fd, q_ref_fd);
+else
+    q_fd = zeros(M_fd, n);
 end
 
 fprintf('\nFD RMSE (vs qdd_ref):\n');
@@ -215,12 +288,47 @@ if do_plot
     if ~isempty(pi_fd), plot_data_tau = [plot_data_tau, tau_fd]; legend_tau{end+1} = 'Y\pi_{fd}'; end %#ok<AGROW>
     plot_compare_with_error_6dof((1:M)', tau_meas, '\tau_{meas}', plot_data_tau(:, 7:end), legend_tau(2:end), 'torque', '逆动力学多模型对比');
 
-    plot_data_qdd = [qdd_ref, qdd_cad, qdd_min];
-    legend_qdd = {'qdd_{ref}','FD(CAD)','FD(\beta)'};
-    if ~isempty(pi_rec), plot_data_qdd = [plot_data_qdd, qdd_rec]; legend_qdd{end+1} = 'FD(\pi_{rec})'; end %#ok<AGROW>
+    % 正动力学：q 对比
+    plot_data_q = [q_ref_fd, q_cad];
+    legend_q = {'q_{meas}','int(FD(CAD))'};
+    if ~isempty(pi_phys), plot_data_q = [plot_data_q, q_phys]; legend_q{end+1} = 'int(FD(\pi_{phys}))'; end %#ok<AGROW>
+    if ~isempty(pi_fd), plot_data_q = [plot_data_q, q_fd]; legend_q{end+1} = 'int(FD(\pi_{fd}))'; end %#ok<AGROW>
+    plot_compare_with_error_6dof(t_fd, q_ref_fd, 'q_{meas}', plot_data_q(:, 7:end), legend_q(2:end), 'q', '正动力学关节角多模型对比');
+
+    % 正动力学：qd 对比
+    plot_data_qd = [qd_ref, qd_cad];
+    legend_qd = {'qd_{ref}','FD(CAD)'};
+    if ~isempty(pi_phys), plot_data_qd = [plot_data_qd, qd_phys]; legend_qd{end+1} = 'FD(\pi_{phys})'; end %#ok<AGROW>
+    if ~isempty(pi_fd), plot_data_qd = [plot_data_qd, qd_fd]; legend_qd{end+1} = 'FD(\pi_{fd})'; end %#ok<AGROW>
+    plot_compare_with_error_6dof(t_fd, qd_ref, 'qd_{ref}', plot_data_qd(:, 7:end), legend_qd(2:end), 'qd', '正动力学角速度多模型对比');
+
+    % 正动力学：qdd 对比
+    plot_data_qdd = [qdd_ref, qdd_cad];
+    legend_qdd = {'qdd_{ref}','FD(CAD)'};
     if ~isempty(pi_phys), plot_data_qdd = [plot_data_qdd, qdd_phys]; legend_qdd{end+1} = 'FD(\pi_{phys})'; end %#ok<AGROW>
     if ~isempty(pi_fd), plot_data_qdd = [plot_data_qdd, qdd_fd]; legend_qdd{end+1} = 'FD(\pi_{fd})'; end %#ok<AGROW>
     plot_compare_with_error_6dof(t_fd, qdd_ref, 'qdd_{ref}', plot_data_qdd(:, 7:end), legend_qdd(2:end), 'qdd', '正动力学多模型对比');
 end
 
 fprintf('\n完成：已基于选择的 CSV 对历史参数做正逆动力学对比。\n');
+
+function q_out = integrate_q_from_qd_local(t_vec, q0, qd_in, q_anchor)
+% 用角速度积分得到关节角；若提供 q_anchor，则每步以 q_anchor(k-1) 为锚
+Mloc = size(qd_in, 1);
+nloc = size(qd_in, 2);
+q_out = zeros(Mloc, nloc);
+if Mloc <= 0, return; end
+q_out(1,:) = q0;
+if Mloc == 1, return; end
+dt_med = median(diff(t_vec));
+if dt_med <= 0 || isnan(dt_med), dt_med = 0.002; end
+for kk = 2:Mloc
+    dt_k = t_vec(kk) - t_vec(kk-1);
+    if ~isfinite(dt_k) || dt_k <= 0, dt_k = dt_med; end
+    if nargin >= 4 && ~isempty(q_anchor)
+        q_out(kk,:) = q_anchor(kk-1,:) + dt_k * qd_in(kk-1,:);
+    else
+        q_out(kk,:) = q_out(kk-1,:) + dt_k * qd_in(kk-1,:);
+    end
+end
+end

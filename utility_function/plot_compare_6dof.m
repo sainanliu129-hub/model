@@ -68,14 +68,26 @@ for i = 1 : nDof
     subplot(2, 3, i)
     hold on;
     for j = 1 : yLength
-        plot(X, y{j}(:, i), PlotType{j}, 'LineWidth', 1.5);
+        h_line = plot(X, y{j}(:, i), PlotType{j}, 'LineWidth', 1.5);
+        if i == 1
+            h_legend_lines(j) = h_line; %#ok<AGROW>
+        end
     end
     hold off;
-    if isempty(LegendString) == 0 && length(LegendString) == yLength
-        legend(LegendString);
-    end
     xlabel(label_x{i});
     ylabel(label_y{i});
+end
+% Legend 只保留一个，并固定到整张图右上角区域，避免遮挡任一子图
+if isempty(LegendString) == 0 && length(LegendString) == yLength
+    try
+        h_leg = legend(h_legend_lines, LegendString, ...
+            'Units', 'normalized', ...
+            'Position', [0.86, 0.90, 0.13, 0.08], ...
+            'Location', 'none');
+        set(h_leg, 'Box', 'on');
+    catch
+        legend(LegendString);
+    end
 end
 local_apply_super_title(label_title);
 function local_apply_super_title(txt)
@@ -91,6 +103,7 @@ end
 annotation('textbox', [0 0.96 1 0.04], ...
     'String', txt, 'EdgeColor', 'none', ...
     'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+end
 end
     
 
